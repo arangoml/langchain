@@ -1,10 +1,37 @@
+import itertools
+import json
 import os
+from collections import defaultdict
 from math import ceil
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+from langchain_community.graphs.graph_document import Document, GraphDocument, Node
+from langchain_community.graphs.neo4j_graph import value_sanitize
+from langchain_community.graphs.graph_store import GraphStore
+
+try:
+    from arango.database import Database
+    from arango.graph import Graph
+
+    ARANGO_INSTALLED = True
+except ImportError:
+    print("ArangoDB not installed, please install with `pip install python-arango`.")
+    ARANGO_INSTALLED = False
 
 
-class ArangoGraph:
+class ArangoGraph(GraphStore):
     """ArangoDB wrapper for graph operations.
+
+    Parameters:
+    db (arango.database.Database): ArangoDB database instance.
+    sanitize (bool): A flag to indicate whether to remove lists with
+            more than 128 elements from results. Useful for removing
+            embedding-like properties from database responses. Default is False.
+    include_examples (bool): A flag whether to scan the database for
+            example values and use them in the graph schema. Default is True.
+    graph_name (str): The name of the graph to use to generate the schema. If
+            None, the entire database will be used.
 
     *Security note*: Make sure that the database connection uses credentials
         that are narrowly-scoped to only include necessary permissions.
@@ -18,59 +45,100 @@ class ArangoGraph:
         See https://python.langchain.com/docs/security for more information.
     """
 
-    def __init__(self, db: Any) -> None:
-        """Create a new ArangoDB graph wrapper instance."""
-        self.set_db(db)
-        self.set_schema()
+    def __init__(
+        self,
+        db: Database,
+        include_examples: bool = True,
+        graph_name: Optional[str] = None,
+    ) -> None:
+        if not ARANGO_INSTALLED:
+            m = "ArangoDB not installed, please install with `pip install python-arango`."
+            raise ImportError(m)
+
+        self.__db: Database = db
+        self.__schema = self.generate_schema(include_examples=include_examples, graph_name=graph_name)
 
     @property
-    def db(self) -> Any:
+    def db(self) -> "Database":
         return self.__db
 
     @property
     def schema(self) -> Dict[str, Any]:
+        """Returns the schema of the Graph Database as a structured object"""
         return self.__schema
 
-    def set_db(self, db: Any) -> None:
-        from arango.database import Database
+    @property
+    def get_structured_schema(self) -> Dict[str, Any]:
+        """Returns the schema of the Graph Database as a structured object"""
+        return self.__schema
 
-        if not isinstance(db, Database):
-            msg = "**db** parameter must inherit from arango.database.Database"
-            raise TypeError(msg)
+    @property
+    def get_schema(self) -> str:
+        """Returns the schema of the Graph Database as a string"""
+        return json.dumps(self.__schema)
 
-        self.__db: Database = db
-        self.set_schema()
+    def set_schema(self, schema: Dict[str, Any]) -> None:
+        """Sets a custom schema for the ArangoDB Database."""
+        self.__schema = schema
 
-    def set_schema(self, schema: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Set the schema of the ArangoDB Database.
-        Auto-generates Schema if **schema** is None.
-        """
-        self.__schema = self.generate_schema() if schema is None else schema
+    def refresh_schema(
+        self,
+        sample_ratio: float = 0,
+        graph_name: Optional[str] = None,
+        include_examples: bool = True,
+    ) -> None:
+        """Refresh the graph schema information."""
+        self.__schema = self.generate_schema(sample_ratio, graph_name, include_examples)
 
     def generate_schema(
-        self, sample_ratio: float = 0
+        self,
+        sample_ratio: float = 0,
+        graph_name: Optional[str] = None,
+        include_examples: bool = True,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Generates the schema of the ArangoDB Database and returns it
-        User can specify a **sample_ratio** (0 to 1) to determine the
+
+        Parameters:
+        sample_ratio (float): A ratio (0 to 1) to determine the
         ratio of documents/edges used (in relation to the Collection size)
         to render each Collection Schema.
+        graph_name (str): The name of the graph to use to generate the schema. If
+            None, the entire database will be used.
+        include_examples (bool): A flag whether to scan the database for
+            example values and use them in the graph schema. Default is True.
         """
         if not 0 <= sample_ratio <= 1:
             raise ValueError("**sample_ratio** value must be in between 0 to 1")
 
-        # Stores the Edge Relationships between each ArangoDB Document Collection
-        graph_schema: List[Dict[str, Any]] = [
-            {"graph_name": g["name"], "edge_definitions": g["edge_definitions"]}
-            for g in self.db.graphs()
-        ]
+        if graph_name:
+            # Fetch a single graph
+            graph: Graph = self.db.graph(graph_name)
+            edge_definitions = graph.edge_definitions()
+
+            graph_schema: List[Dict[str, Any]] = [{"name": graph_name, "edge_definitions": edge_definitions}]
+
+            # Fetch graph-specific collections
+            collection_names = set(graph.vertex_collections())
+            for edge_definition in edge_definitions:
+                collection_names.add(edge_definition["edge_collection"])
+
+        else:
+            # Fetch all graphs
+            graph_schema: List[Dict[str, Any]] = [
+                {"graph_name": g["name"], "edge_definitions": g["edge_definitions"]} for g in self.db.graphs()
+            ]
+
+            # Fetch all collections
+            collection_names = {collection["name"] for collection in self.db.collections()}
 
         # Stores the schema of every ArangoDB Document/Edge collection
         collection_schema: List[Dict[str, Any]] = []
-
         for collection in self.db.collections():
             if collection["system"]:
+                continue
+
+            if collection["name"] not in collection_names:
                 continue
 
             # Extract collection name, type, and size
@@ -86,36 +154,170 @@ class ArangoGraph:
             limit_amount = ceil(sample_ratio * col_size) or 1
 
             aql = f"""
-                FOR doc in {col_name}
+                FOR doc in @@col_name
                     LIMIT {limit_amount}
                     RETURN doc
             """
 
             doc: Dict[str, Any]
             properties: List[Dict[str, str]] = []
-            for doc in self.__db.aql.execute(aql):
+            for doc in self.db.aql.execute(aql, bind_vars={"@col_name": col_name}):
                 for key, value in doc.items():
                     properties.append({"name": key, "type": type(value).__name__})
 
-            collection_schema.append(
-                {
-                    "collection_name": col_name,
-                    "collection_type": col_type,
-                    f"{col_type}_properties": properties,
-                    f"example_{col_type}": doc,
-                }
-            )
+            collection_schema_entry = {
+                "name": col_name,
+                "type": col_type,
+                f"properties": properties,
+            }
 
-        return {"Graph Schema": graph_schema, "Collection Schema": collection_schema}
+            if include_examples:
+                collection_schema_entry[f"example"] = value_sanitize(doc)
 
-    def query(
-        self, query: str, top_k: Optional[int] = None, **kwargs: Any
-    ) -> List[Dict[str, Any]]:
+            collection_schema.append(collection_schema_entry)
+
+        return {"graph_schema": graph_schema, "collection_schema": collection_schema}
+
+    def query(self, query: str, top_k: Optional[int] = None, **kwargs: Any) -> List[Dict[str, Any]]:
         """Query the ArangoDB database."""
-        import itertools
-
         cursor = self.__db.aql.execute(query, **kwargs)
-        return [doc for doc in itertools.islice(cursor, top_k)]
+        return [value_sanitize(doc) for doc in itertools.islice(cursor, top_k)]
+
+    def explain(self, query: str, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        """Explain an AQL query without executing it."""
+        return self.__db.aql.explain(query)
+
+    def add_graph_documents(
+        self,
+        graph_documents: List[GraphDocument],
+        include_source: bool = False,
+        batch_size: int = 1000,
+        graph_name: Optional[str] = None,
+    ) -> None:
+        """
+        This method constructs nodes and relationships in the graph based on the
+        provided GraphDocument objects.
+
+        Parameters:
+        - graph_documents (List[GraphDocument]): A list of GraphDocument objects
+        that contain the nodes and relationships to be added to the graph. Each
+        GraphDocument should encapsulate the structure of part of the graph,
+        including nodes, relationships, and the source document information.
+        - include_source (bool, optional): If True, stores the source document
+        and links it to nodes in the graph using the MENTIONS relationship.
+        This is useful for tracing back the origin of data. Merges source
+        documents based on the `id` property from the source document metadata
+        if available; otherwise it calculates the MD5 hash of `page_content`
+        for merging process. Defaults to False.
+        - graph_name (str): The name of the ArangoDB General Graph to create. If None,
+            no graph will be created.
+        """
+        if not graph_documents:
+            return
+
+        nodes = defaultdict(list)
+        edges = defaultdict(list)
+        edge_definitions_dict = defaultdict(lambda: defaultdict(set))
+
+        if include_source:
+            if not self.db.has_collection("MENTIONS"):
+                self.db.create_collection("MENTIONS", edge=True)
+
+            if not self.db.has_collection("GraphDocumentSource"):
+                self.db.create_collection("GraphDocumentSource")
+
+            edge_definitions_dict["MENTIONS"] = {
+                "edge_collection": "MENTIONS",
+                "from_vertex_collections": {"GraphDocumentSource"},
+                "to_vertex_collections": set(),
+            }
+
+        for document in graph_documents:
+            for i, node in enumerate(document.nodes, 1):
+                node_data = {"_key": str(node.id), **node.properties}
+                nodes[node.type].append(node_data)
+
+                if i % batch_size == 0:
+                    self.__import_data(nodes, is_edge=False)
+
+            self.__import_data(nodes, is_edge=False)
+
+            # Insert relationships
+            for i, rel in enumerate(document.relationships, 1):
+                source: Node = rel.source
+                target: Node = rel.target
+
+                edge_definitions_dict[rel.type]["edge_collection"].add(rel.type)
+                edge_definitions_dict[rel.type]["from_vertex_collections"].add(source.type)
+                edge_definitions_dict[rel.type]["to_vertex_collections"].add(target.type)
+
+                rel_data = {
+                    "_from": f"{source.type}/{source.id}",
+                    "_to": f"{target.type}/{target.id}",
+                    **rel.properties,
+                }
+
+                edges[rel.type].append(rel_data)
+
+                if i % batch_size == 0:
+                    self.__import_data(edges, is_edge=True)
+
+            self.__import_data(edges, is_edge=True)
+
+            # Insert source document if required
+            if include_source:
+                doc_source: Document = document.source
+
+                _key = str(doc_source.metadata.get("id", uuid4()))
+                source_data = {
+                    "_key": _key,
+                    "text": doc_source.page_content,
+                    "metadata": doc_source.metadata,
+                }
+
+                self.db.collection("GraphDocumentSource").insert(source_data, overwrite=True)
+
+                mentions = []
+                mentions_col = self.db.collection("MENTIONS")
+                for i, node in enumerate(document.nodes, 1):
+                    edge_definitions_dict["MENTIONS"]["to_vertex_collections"].add(node.type)
+
+                    mentions.append(
+                        {
+                            "_from": f"GraphDocumentSource/{_key}",
+                            "_to": f"{node.type}/{str(node.id)}",
+                        }
+                    )
+
+                    if i % batch_size == 0:
+                        mentions_col.import_bulk(mentions, on_duplicate="update")
+                        mentions.clear()
+
+                mentions_col.import_bulk(mentions, on_duplicate="update")
+
+        if graph_name:
+            edge_definitions = []
+            for k, v in edge_definitions_dict.items():
+                edge_definitions.append(
+                    {
+                        "edge_collection": k,
+                        "from_vertex_collections": list(v["from_vertex_collections"]),
+                        "to_vertex_collections": list(v["to_vertex_collections"]),
+                    }
+                )
+
+            if not self.db.has_graph(graph_name):
+                self.db.create_graph(graph_name, edge_definitions)
+            else:
+                graph = self.db.graph(graph_name)
+                for e_d in edge_definitions:
+                    if not graph.has_edge_definition(e_d["edge_collection"]):
+                        graph.create_edge_definition(*e_d.values())
+                    else:
+                        graph.replace_edge_definition(*e_d.values())
+
+        # Refresh schema after insertions
+        self.refresh_schema()
 
     @classmethod
     def from_db_credentials(
@@ -140,10 +342,17 @@ class ArangoGraph:
         Returns:
             An arango.database.StandardDatabase.
         """
-        db = get_arangodb_client(
-            url=url, dbname=dbname, username=username, password=password
-        )
+        db = get_arangodb_client(url=url, dbname=dbname, username=username, password=password)
         return cls(db)
+
+    def __import_data(self, data: Dict[str, List[Dict[str, Any]]], is_edge: bool) -> None:
+        for collection, batch in data.items():
+            if not self.db.has_collection(collection):
+                self.db.create_collection(collection, edge=is_edge)
+
+            self.db.collection(collection).import_bulk(batch, on_duplicate="update")
+
+        data.clear()
 
 
 def get_arangodb_client(
@@ -170,9 +379,8 @@ def get_arangodb_client(
     try:
         from arango import ArangoClient
     except ImportError as e:
-        raise ImportError(
-            "Unable to import arango, please install with `pip install python-arango`."
-        ) from e
+        m = "Unable to import arango, please install with `pip install python-arango`."
+        raise ImportError(m) from e
 
     _url: str = url or os.environ.get("ARANGODB_URL", "http://localhost:8529")  # type: ignore[assignment]
     _dbname: str = dbname or os.environ.get("ARANGODB_DBNAME", "_system")  # type: ignore[assignment]
