@@ -234,9 +234,10 @@ class ArangoGraph(GraphStore):
 
         for document in graph_documents:
             for i, node in enumerate(document.nodes, 1):
-                node_id = str(node.id)
-                node_data = {"_key": node_id.replace(' ', '_'), "id": node_id, **node.properties}
-                nodes[node.type].append(node_data)
+                node_id = str(node.id).replace(' ', '_')
+                node_type = node.type.replace(' ', '_')
+                node_data = {"_key": node_id, **node.properties}
+                nodes[node_type].append(node_data)
 
                 if i % batch_size == 0:
                     self.__import_data(nodes, is_edge=False)
@@ -248,17 +249,24 @@ class ArangoGraph(GraphStore):
                 source: Node = rel.source
                 target: Node = rel.target
 
-                edge_definitions_dict[rel.type]["edge_collection"].add(rel.type)
-                edge_definitions_dict[rel.type]["from_vertex_collections"].add(source.type)
-                edge_definitions_dict[rel.type]["to_vertex_collections"].add(target.type)
+                rel_type = rel.type.replace(' ', '_')
+                source_type = source.type.replace(' ', '_')
+                target_type = target.type.replace(' ', '_')
+
+                source_id = str(source.id).replace(' ', '_')
+                target_id = str(target.id).replace(' ', '_')
+
+                edge_definitions_dict[rel_type]["edge_collection"].add(rel_type)
+                edge_definitions_dict[rel_type]["from_vertex_collections"].add(source_type)
+                edge_definitions_dict[rel_type]["to_vertex_collections"].add(target_type)
 
                 rel_data = {
-                    "_from": f"{source.type}/{source.id}",
-                    "_to": f"{target.type}/{target.id}",
+                    "_from": f"{source_type}/{source_id}",
+                    "_to": f"{rel_type}/{target_id}",
                     **rel.properties,
                 }
 
-                edges[rel.type].append(rel_data)
+                edges[rel_type].append(rel_data)
 
                 if i % batch_size == 0:
                     self.__import_data(edges, is_edge=True)
@@ -269,9 +277,9 @@ class ArangoGraph(GraphStore):
             if include_source:
                 doc_source: Document = document.source
 
-                _key = str(doc_source.metadata.get("id", uuid4()))
+                _key = str(doc_source.metadata.get("id", uuid4())).replace(' ', '_')
                 source_data = {
-                    "_key": _key.replace(' ', '_'),
+                    "_key": _key,
                     "text": doc_source.page_content,
                     "metadata": doc_source.metadata,
                 }
@@ -281,12 +289,14 @@ class ArangoGraph(GraphStore):
                 mentions = []
                 mentions_col = self.db.collection("MENTIONS")
                 for i, node in enumerate(document.nodes, 1):
-                    edge_definitions_dict["MENTIONS"]["to_vertex_collections"].add(node.type)
+                    node_id = str(node.id).replace(' ', '_')
+                    node_type = node.type.replace(' ', '_')
+                    edge_definitions_dict["MENTIONS"]["to_vertex_collections"].add(node_type)
 
                     mentions.append(
                         {
                             "_from": f"GraphDocumentSource/{_key}",
-                            "_to": f"{node.type}/{str(node.id)}",
+                            "_to": f"{node_type}/{node_id}",
                         }
                     )
 
