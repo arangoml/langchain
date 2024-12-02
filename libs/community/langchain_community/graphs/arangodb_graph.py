@@ -262,7 +262,7 @@ class ArangoGraph(GraphStore):
 
                 rel_data = {
                     "_from": f"{source_type}/{source_id}",
-                    "_to": f"{rel_type}/{target_id}",
+                    "_to": f"{target_type}/{target_id}",
                     **rel.properties,
                 }
 
