@@ -234,7 +234,8 @@ class ArangoGraph(GraphStore):
 
         for document in graph_documents:
             for i, node in enumerate(document.nodes, 1):
-                node_data = {"_key": str(node.id), **node.properties}
+                node_id = str(node.id)
+                node_data = {"_key": node_id.replace(' ', '_'), "id": node_id, **node.properties}
                 nodes[node.type].append(node_data)
 
                 if i % batch_size == 0:
@@ -270,7 +271,7 @@ class ArangoGraph(GraphStore):
 
                 _key = str(doc_source.metadata.get("id", uuid4()))
                 source_data = {
-                    "_key": _key,
+                    "_key": _key.replace(' ', '_'),
                     "text": doc_source.page_content,
                     "metadata": doc_source.metadata,
                 }
