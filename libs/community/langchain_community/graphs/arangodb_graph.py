@@ -32,10 +32,6 @@ except ImportError:
     print("Farmhash not installed, please install with `pip install cityhash`.")
     FARMHASH_INSTALLED = False
 
-##########################################
-# Defaults for Graph Document processing #
-##########################################
-
 SOURCE_VERTEX_COLLECTION = "SOURCE"
 SOURCE_EDGE_COLLECTION = "HAS_SOURCE"
 ENTITY_VERTEX_COLLECTION = "ENTITY"
@@ -183,10 +179,7 @@ class ArangoGraph(GraphStore):
         # Stores the schema of every ArangoDB Document/Edge collection
         collection_schema: List[Dict[str, Any]] = []
         for collection in self.db.collections():
-            if collection["system"]:
-                continue
-
-            if collection["name"] not in collection_names:
+            if collection["system"] or collection["name"] not in collection_names:
                 continue
 
             # Extract collection name, type, and size
@@ -354,9 +347,9 @@ class ArangoGraph(GraphStore):
 
         source_id_hash = None
 
-        #############
-        # Main Loop #
-        #############
+        #######################
+        # Document Processing #
+        #######################
 
         for document in graph_documents:
             # 1. Process Source Document
@@ -376,8 +369,8 @@ class ArangoGraph(GraphStore):
                 if include_source:
                     edges[source_edge_collection_name].append(
                         {
-                            "_from": f"{source_collection_name}/{source_id_hash}",
-                            "_to": f"{node_type}/{node_key}",
+                            "_from": f"{node_type}/{node_key}",
+                            "_to": f"{source_collection_name}/{source_id_hash}",
                         }
                     )
 
