@@ -1,17 +1,22 @@
 import itertools
 import json
 import os
+import re
 from collections import defaultdict
 from math import ceil
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from typing import Any, DefaultDict, Dict, List, Optional
 
-from langchain_community.graphs.graph_document import Document, GraphDocument, Node
-from langchain_community.graphs.neo4j_graph import value_sanitize
+from langchain_community.graphs.graph_document import (
+    Document,
+    GraphDocument,
+    Node,
+    Relationship,
+)
 from langchain_community.graphs.graph_store import GraphStore
+from langchain_community.graphs.neo4j_graph import value_sanitize
 
 try:
-    from arango.database import Database
+    from arango.database import StandardDatabase
     from arango.graph import Graph
 
     ARANGO_INSTALLED = True
@@ -19,19 +24,35 @@ except ImportError:
     print("ArangoDB not installed, please install with `pip install python-arango`.")
     ARANGO_INSTALLED = False
 
+try:
+    import farmhash
+
+    FARMHASH_INSTALLED = True
+except ImportError:
+    print("Farmhash not installed, please install with `pip install cityhash`.")
+    FARMHASH_INSTALLED = False
+
+##########################################
+# Defaults for Graph Document processing #
+##########################################
+
+SOURCE_VERTEX_COLLECTION = "SOURCE"
+SOURCE_EDGE_COLLECTION = "HAS_SOURCE"
+ENTITY_VERTEX_COLLECTION = "ENTITY"
+ENTITY_EDGE_COLLECTION = "LINKS_TO"
+
 
 class ArangoGraph(GraphStore):
     """ArangoDB wrapper for graph operations.
 
     Parameters:
-    db (arango.database.Database): ArangoDB database instance.
-    sanitize (bool): A flag to indicate whether to remove lists with
-            more than 128 elements from results. Useful for removing
-            embedding-like properties from database responses. Default is False.
-    include_examples (bool): A flag whether to scan the database for
-            example values and use them in the graph schema. Default is True.
-    graph_name (str): The name of the graph to use to generate the schema. If
-            None, the entire database will be used.
+    - db (arango.database.StandardDatabase): ArangoDB database instance.
+    - include_examples (bool): A flag whether to scan the database for
+        example values and use them in the graph schema. Default is True.
+    - graph_name (str): The name of the graph to use to generate the schema. If
+        None, the entire database will be used.
+    - generate_schema_on_init (bool): A flag whether to generate the schema
+        on initialization. Default is True.
 
     *Security note*: Make sure that the database connection uses credentials
         that are narrowly-scoped to only include necessary permissions.
@@ -47,19 +68,30 @@ class ArangoGraph(GraphStore):
 
     def __init__(
         self,
-        db: Database,
+        db: StandardDatabase,
         include_examples: bool = True,
         graph_name: Optional[str] = None,
+        generate_schema_on_init: bool = True,
     ) -> None:
         if not ARANGO_INSTALLED:
             m = "ArangoDB not installed, please install with `pip install python-arango`."
             raise ImportError(m)
 
-        self.__db: Database = db
-        self.__schema = self.generate_schema(include_examples=include_examples, graph_name=graph_name)
+        if not FARMHASH_INSTALLED:
+            m = "Farmhash not installed, please install with `pip install cityhash`."
+            raise ImportError(m)
+
+        self.__db = db
+        self.__async_db = db.begin_async_execution()
+
+        self.__schema = {}
+        if generate_schema_on_init:
+            self.__schema = self.generate_schema(
+                include_examples=include_examples, graph_name=graph_name
+            )
 
     @property
-    def db(self) -> "Database":
+    def db(self) -> "StandardDatabase":
         return self.__db
 
     @property
@@ -87,7 +119,18 @@ class ArangoGraph(GraphStore):
         graph_name: Optional[str] = None,
         include_examples: bool = True,
     ) -> None:
-        """Refresh the graph schema information."""
+        """
+        Refresh the graph schema information.
+
+        Parameters:
+        - sample_ratio (float): A ratio (0 to 1) to determine the
+        ratio of documents/edges used (in relation to the Collection size) to render
+        each Collection Schema.
+        - graph_name (str): The name of the graph to use to generate the schema. If
+            None, the entire database will be used.
+        - include_examples (bool): A flag whether to scan the database for
+            example values and use them in the graph schema. Default is True.
+        """
         self.__schema = self.generate_schema(sample_ratio, graph_name, include_examples)
 
     def generate_schema(
@@ -100,12 +143,12 @@ class ArangoGraph(GraphStore):
         Generates the schema of the ArangoDB Database and returns it
 
         Parameters:
-        sample_ratio (float): A ratio (0 to 1) to determine the
+        - sample_ratio (float): A ratio (0 to 1) to determine the
         ratio of documents/edges used (in relation to the Collection size)
         to render each Collection Schema.
-        graph_name (str): The name of the graph to use to generate the schema. If
+        - graph_name (str): The name of the graph to use to generate the schema. If
             None, the entire database will be used.
-        include_examples (bool): A flag whether to scan the database for
+        - include_examples (bool): A flag whether to scan the database for
             example values and use them in the graph schema. Default is True.
         """
         if not 0 <= sample_ratio <= 1:
@@ -116,7 +159,9 @@ class ArangoGraph(GraphStore):
             graph: Graph = self.db.graph(graph_name)
             edge_definitions = graph.edge_definitions()
 
-            graph_schema: List[Dict[str, Any]] = [{"name": graph_name, "edge_definitions": edge_definitions}]
+            graph_schema: List[Dict[str, Any]] = [
+                {"name": graph_name, "edge_definitions": edge_definitions}
+            ]
 
             # Fetch graph-specific collections
             collection_names = set(graph.vertex_collections())
@@ -126,11 +171,14 @@ class ArangoGraph(GraphStore):
         else:
             # Fetch all graphs
             graph_schema: List[Dict[str, Any]] = [
-                {"graph_name": g["name"], "edge_definitions": g["edge_definitions"]} for g in self.db.graphs()
+                {"graph_name": g["name"], "edge_definitions": g["edge_definitions"]}
+                for g in self.db.graphs()
             ]
 
             # Fetch all collections
-            collection_names = {collection["name"] for collection in self.db.collections()}
+            collection_names = {
+                collection["name"] for collection in self.db.collections()
+            }
 
         # Stores the schema of every ArangoDB Document/Edge collection
         collection_schema: List[Dict[str, Any]] = []
@@ -178,24 +226,52 @@ class ArangoGraph(GraphStore):
 
         return {"graph_schema": graph_schema, "collection_schema": collection_schema}
 
-    def query(self, query: str, top_k: Optional[int] = None, **kwargs: Any) -> List[Dict[str, Any]]:
-        """Query the ArangoDB database."""
+    def query(
+        self, query: str, top_k: Optional[int] = None, **kwargs: Any
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute an AQL query and return the results.
+
+        Parameters:
+        - query (str): The AQL query to execute.
+        - top_k (int): The number of results to return. If None, all results are returned.
+        - kwargs: Additional keyword arguments to pass to the AQL query.
+
+        Returns:
+        - A list of dictionaries containing the query results.
+        """
         cursor = self.__db.aql.execute(query, **kwargs)
         return [value_sanitize(doc) for doc in itertools.islice(cursor, top_k)]
 
     def explain(self, query: str, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
-        """Explain an AQL query without executing it."""
+        """
+        Explain an AQL query without executing it.
+
+        Parameters:
+        - query (str): The AQL query to explain.
+        - args: Additional positional arguments to pass to the AQL query.
+        - kwargs: Additional keyword arguments to pass to the AQL query.
+
+        Returns:
+        - A list of dictionaries containing the query explanation.
+        """
         return self.__db.aql.explain(query)
 
     def add_graph_documents(
         self,
         graph_documents: List[GraphDocument],
         include_source: bool = False,
-        batch_size: int = 1000,
         graph_name: Optional[str] = None,
+        batch_size: int = 1000,
+        use_one_entity_collection: bool = True,
+        insert_async: bool = False,
+        source_collection_name: str = SOURCE_VERTEX_COLLECTION,
+        source_edge_collection_name: str = SOURCE_EDGE_COLLECTION,
+        entity_collection_name: str = ENTITY_VERTEX_COLLECTION,
+        entity_edge_collection_name: str = ENTITY_EDGE_COLLECTION,
     ) -> None:
         """
-        This method constructs nodes and relationships in the graph based on the
+        Constructs nodes & relationships in the graph based on the
         provided GraphDocument objects.
 
         Parameters:
@@ -204,121 +280,149 @@ class ArangoGraph(GraphStore):
         GraphDocument should encapsulate the structure of part of the graph,
         including nodes, relationships, and the source document information.
         - include_source (bool, optional): If True, stores the source document
-        and links it to nodes in the graph using the MENTIONS relationship.
+        and links it to nodes in the graph using the HAS_SOURCE relationship.
         This is useful for tracing back the origin of data. Merges source
-        documents based on the `id` property from the source document metadata
-        if available; otherwise it calculates the MD5 hash of `page_content`
+        documents based on the `id` property from the source document if available,
+        otherwise it calculates the Farmhash hash of `page_content`
         for merging process. Defaults to False.
         - graph_name (str): The name of the ArangoDB General Graph to create. If None,
             no graph will be created.
+        - batch_size (int): The number of nodes/edges to insert in a single batch.
+        - use_one_entity_collection (bool): If True, all nodes are stored in a single
+        entity collection. If False, nodes are stored in separate collections based
+        on their type. Defaults to True.
+        - insert_async (bool): If True, inserts data asynchronously. Defaults to False.
+        - source_collection_name (str): The name of the collection to store the source
+        documents. Defaults to "SOURCE".
+        - source_edge_collection_name (str): The name of the edge collection to store
+        the relationships between source documents and nodes. Defaults to "HAS_SOURCE".
+        - entity_collection_name (str): The name of the collection to store the nodes.
+        Defaults to "ENTITY". Only used if `use_one_entity_collection` is True.
+        - entity_edge_collection_name (str): The name of the edge collection to store
+        the relationships between nodes. Defaults to "LINKS_TO". Only used if
+        `use_one_entity_collection` is True.
         """
         if not graph_documents:
             return
 
-        nodes = defaultdict(list)
-        edges = defaultdict(list)
-        edge_definitions_dict = defaultdict(lambda: defaultdict(set))
+        #########
+        # Setup #
+        #########
+
+        insertion_db = self.__async_db if insert_async else self.__db
+        nodes: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
+        edges: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
+        edge_definitions_dict: DefaultDict[
+            str, DefaultDict[str, set[str]]
+        ] = defaultdict(lambda: defaultdict(set))
 
         if include_source:
-            if not self.db.has_collection("MENTIONS"):
-                self.db.create_collection("MENTIONS", edge=True)
+            self.__create_collection(source_collection_name)
+            self.__create_collection(source_edge_collection_name, is_edge=True)
 
-            if not self.db.has_collection("GraphDocumentSource"):
-                self.db.create_collection("GraphDocumentSource")
-
-            edge_definitions_dict["MENTIONS"] = {
-                "edge_collection": "MENTIONS",
-                "from_vertex_collections": {"GraphDocumentSource"},
-                "to_vertex_collections": set(),
+            edge_definitions_dict[source_edge_collection_name] = {
+                "from_vertex_collections": {entity_collection_name}
+                if use_one_entity_collection
+                else set(),
+                "to_vertex_collections": {source_collection_name},
             }
 
+        if use_one_entity_collection:
+            self.__create_collection(entity_collection_name)
+            self.__create_collection(entity_edge_collection_name, is_edge=True)
+
+            edge_definitions_dict[entity_edge_collection_name] = {
+                "from_vertex_collections": {entity_collection_name},
+                "to_vertex_collections": {entity_collection_name},
+            }
+
+        process_node_fn = (
+            self.__process_node_as_entity
+            if use_one_entity_collection
+            else self.__process_node_as_type
+        )
+
+        process_edge_fn = (
+            self.__process_edge_as_entity
+            if use_one_entity_collection
+            else self.__process_edge_as_type
+        )
+
+        source_id_hash = None
+
+        #############
+        # Main Loop #
+        #############
+
         for document in graph_documents:
-            for i, node in enumerate(document.nodes, 1):
-                node_id = str(node.id).replace(' ', '_')
-                node_type = node.type.replace(' ', '_')
-                node_data = {"_key": node_id, **node.properties}
-                nodes[node_type].append(node_data)
-
-                if i % batch_size == 0:
-                    self.__import_data(nodes, is_edge=False)
-
-            self.__import_data(nodes, is_edge=False)
-
-            # Insert relationships
-            for i, rel in enumerate(document.relationships, 1):
-                source: Node = rel.source
-                target: Node = rel.target
-
-                rel_type = rel.type.replace(' ', '_')
-                source_type = source.type.replace(' ', '_')
-                target_type = target.type.replace(' ', '_')
-
-                source_id = str(source.id).replace(' ', '_')
-                target_id = str(target.id).replace(' ', '_')
-
-                edge_definitions_dict[rel_type]["edge_collection"].add(rel_type)
-                edge_definitions_dict[rel_type]["from_vertex_collections"].add(source_type)
-                edge_definitions_dict[rel_type]["to_vertex_collections"].add(target_type)
-
-                rel_data = {
-                    "_from": f"{source_type}/{source_id}",
-                    "_to": f"{target_type}/{target_id}",
-                    **rel.properties,
-                }
-
-                edges[rel_type].append(rel_data)
-
-                if i % batch_size == 0:
-                    self.__import_data(edges, is_edge=True)
-
-            self.__import_data(edges, is_edge=True)
-
-            # Insert source document if required
+            # 1. Process Source Document
             if include_source:
-                doc_source: Document = document.source
+                source_id_hash = self.__process_source(
+                    document.source, source_collection_name
+                )
 
-                _key = str(doc_source.metadata.get("id", uuid4())).replace(' ', '_')
-                source_data = {
-                    "_key": _key,
-                    "text": doc_source.page_content,
-                    "metadata": doc_source.metadata,
-                }
+            # 2. Process Nodes
+            for i, node in enumerate(document.nodes, 1):
+                node_key = self.__hash(node.id)
+                node_type = process_node_fn(
+                    node_key, node, nodes, entity_collection_name
+                )
 
-                self.db.collection("GraphDocumentSource").insert(source_data, overwrite=True)
-
-                mentions = []
-                mentions_col = self.db.collection("MENTIONS")
-                for i, node in enumerate(document.nodes, 1):
-                    node_id = str(node.id).replace(' ', '_')
-                    node_type = node.type.replace(' ', '_')
-                    edge_definitions_dict["MENTIONS"]["to_vertex_collections"].add(node_type)
-
-                    mentions.append(
+                # 2.1 Link Source Document to Node
+                if include_source:
+                    edges[source_edge_collection_name].append(
                         {
-                            "_from": f"GraphDocumentSource/{_key}",
-                            "_to": f"{node_type}/{node_id}",
+                            "_from": f"{source_collection_name}/{source_id_hash}",
+                            "_to": f"{node_type}/{node_key}",
                         }
                     )
 
-                    if i % batch_size == 0:
-                        mentions_col.import_bulk(mentions, on_duplicate="update")
-                        mentions.clear()
+                    if not use_one_entity_collection:
+                        edge_definitions_dict[source_edge_collection_name][
+                            "from_vertex_collections"
+                        ].add(node_type)
 
-                mentions_col.import_bulk(mentions, on_duplicate="update")
+                # 2.2 Batch Insert
+                if i % batch_size == 0:
+                    self.__import_data(insertion_db, nodes, is_edge=False)
+                    self.__import_data(insertion_db, edges, is_edge=True)
+
+            self.__import_data(insertion_db, nodes, is_edge=False)
+            self.__import_data(insertion_db, edges, is_edge=True)
+
+            # 3. Process Edges
+            for i, edge in enumerate(document.relationships, 1):
+                process_edge_fn(
+                    edge,
+                    edges,
+                    entity_collection_name,
+                    entity_edge_collection_name,
+                    edge_definitions_dict,
+                )
+
+                # 3.1 Batch Insert
+                if i % batch_size == 0:
+                    self.__import_data(insertion_db, edges, is_edge=True)
+
+            self.__import_data(insertion_db, edges, is_edge=True)
+
+        ##################
+        # Graph Creation #
+        ##################
 
         if graph_name:
-            edge_definitions = []
-            for k, v in edge_definitions_dict.items():
-                edge_definitions.append(
-                    {
-                        "edge_collection": k,
-                        "from_vertex_collections": list(v["from_vertex_collections"]),
-                        "to_vertex_collections": list(v["to_vertex_collections"]),
-                    }
-                )
+            edge_definitions = [
+                {
+                    "edge_collection": k,
+                    "from_vertex_collections": list(v["from_vertex_collections"]),
+                    "to_vertex_collections": list(v["to_vertex_collections"]),
+                }
+                for k, v in edge_definitions_dict.items()
+            ]
 
             if not self.db.has_graph(graph_name):
                 self.db.create_graph(graph_name, edge_definitions)
+
             else:
                 graph = self.db.graph(graph_name)
                 for e_d in edge_definitions:
@@ -353,17 +457,159 @@ class ArangoGraph(GraphStore):
         Returns:
             An arango.database.StandardDatabase.
         """
-        db = get_arangodb_client(url=url, dbname=dbname, username=username, password=password)
+        db = get_arangodb_client(
+            url=url, dbname=dbname, username=username, password=password
+        )
         return cls(db)
 
-    def __import_data(self, data: Dict[str, List[Dict[str, Any]]], is_edge: bool) -> None:
+    def __import_data(
+        self,
+        db: "StandardDatabase",
+        data: Dict[str, List[Dict[str, Any]]],
+        is_edge: bool,
+    ) -> None:
+        """Imports data into the ArangoDB database in bulk."""
         for collection, batch in data.items():
-            if not self.db.has_collection(collection):
-                self.db.create_collection(collection, edge=is_edge)
-
-            self.db.collection(collection).import_bulk(batch, on_duplicate="update")
+            self.__create_collection(collection, is_edge)
+            db.collection(collection).import_bulk(batch, on_duplicate="update")
 
         data.clear()
+
+    def __create_collection(
+        self, collection_name: str, is_edge: bool = False, **kwargs
+    ) -> None:
+        """Creates a collection in the ArangoDB database if it does not exist."""
+        if not self.db.has_collection(collection_name):
+            self.db.create_collection(collection_name, edge=is_edge, **kwargs)
+
+    def __process_node_as_entity(
+        self,
+        node_key: str,
+        node: Node,
+        nodes: DefaultDict[str, list],
+        entity_collection_name: str,
+    ) -> tuple[str, str]:
+        """Processes a Graph Document Node into ArangoDB as a unanimous Entity."""
+        nodes[entity_collection_name].append(
+            {
+                "_key": node_key,
+                "name": node.id,
+                "type": node.type,
+                **node.properties,
+            }
+        )
+        return entity_collection_name
+
+    def __process_node_as_type(
+        self, node_key: str, node: Node, nodes: DefaultDict[str, list], _: str
+    ) -> str:
+        """Processes a Graph Document Node into ArangoDB based on its Node Type."""
+        node_type = self.__sanitize_collection_name(node.type)
+        nodes[node_type].append({"_key": node_key, "name": node.id, **node.properties})
+        return node_type
+
+    def __process_edge_as_entity(
+        self,
+        edge: Relationship,
+        edges: DefaultDict[str, list],
+        entity_collection_name: str,
+        entity_edge_collection_name: str,
+        _: DefaultDict[str, DefaultDict[str, set[str]]],
+    ) -> None:
+        """Processes a Graph Document Edge into ArangoDB as a unanimous Entity."""
+        source: Node = edge.source
+        target: Node = edge.target
+
+        source_key = self.__hash(source.id)
+        target_key = self.__hash(target.id)
+
+        edges[entity_edge_collection_name].append(
+            {
+                "_from": f"{entity_collection_name}/{source_key}",
+                "_to": f"{entity_collection_name}/{target_key}",
+                "type": edge.type,
+                **edge.properties,
+            }
+        )
+
+    def __process_edge_as_type(
+        self,
+        edge: Relationship,
+        edges: DefaultDict[str, list],
+        _1: str,
+        _2: str,
+        edge_definitions_dict: DefaultDict[str, DefaultDict[str, set[str]]],
+    ) -> None:
+        """Processes a Graph Document Edge into ArangoDB based on its Edge Type."""
+        source: Node = edge.source
+        target: Node = edge.target
+
+        source_key = self.__hash(source.id)
+        target_key = self.__hash(target.id)
+
+        edge_type = self.__sanitize_collection_name(edge.type)
+        source_type = self.__sanitize_collection_name(source.type)
+        target_type = self.__sanitize_collection_name(target.type)
+
+        edge_definitions_dict[edge_type]["from_vertex_collections"].add(source_type)
+        edge_definitions_dict[edge_type]["to_vertex_collections"].add(target_type)
+
+        edges[edge_type].append(
+            {
+                "_from": f"{source_type}/{source_key}",
+                "_to": f"{target_type}/{target_key}",
+                **edge.properties,
+            }
+        )
+
+    def __process_source(self, source: Document, source_collection_name: str) -> str:
+        """Processes a Graph Document Source into ArangoDB."""
+        source_id = self.__hash(
+            source.id if source.id else source.page_content.encode("utf-8")
+        )
+
+        self.db.collection(source_collection_name).insert(
+            {
+                "_key": source_id,
+                "text": source.page_content,
+                "type": source.type,
+                "metadata": source.metadata,
+            },
+            overwrite=True,
+        )
+
+        return source_id
+
+    def __hash(self, value: Any) -> str:
+        """Applies the Farmhash hash function to a value."""
+        try:
+            value_str = str(value)
+        except Exception:
+            raise ValueError("Value must be a string or have a string representation.")
+
+        return str(farmhash.Fingerprint64(value_str))
+
+    def __sanitize_collection_name(self, name: str) -> str:
+        """
+        Modifies a string to adhere to ArangoDB collection name rules.
+
+        - Trims the name to 256 characters if it's too long.
+        - Replaces invalid characters with underscores (_).
+        - Ensures the name starts with a letter (prepends 'a' if needed).
+        """
+        if not name:
+            raise ValueError("Collection name cannot be empty.")
+
+        name = name[:256]
+
+        # Replace invalid characters with underscores
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+        # Ensure the name starts with a letter; prepend 'a' if not
+        if not re.match(r"^[a-zA-Z]", name):
+            name = f"Collection_{name}"
+
+        return name
 
 
 def get_arangodb_client(
