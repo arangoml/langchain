@@ -262,6 +262,7 @@ class ArangoGraph(GraphStore):
         graph_documents: List[GraphDocument],
         include_source: bool = False,
         graph_name: Optional[str] = None,
+        update_graph_definition_if_exists: bool = False,
         batch_size: int = 1000,
         use_one_entity_collection: bool = True,
         insert_async: bool = False,
@@ -287,6 +288,9 @@ class ArangoGraph(GraphStore):
         for merging process. Defaults to False.
         - graph_name (str): The name of the ArangoDB General Graph to create. If None,
             no graph will be created.
+        - update_graph_definition_if_exists (bool): If True, updates the graph Edge Definitions
+        if it already exists. Defaults to False. Not used if `graph_name` is None. It is
+        recommended to set this to True if `use_one_entity_collection` is set to False.
         - batch_size (int): The number of nodes/edges to insert in a single batch.
         - use_one_entity_collection (bool): If True, all nodes are stored in a single
         entity collection. If False, nodes are stored in separate collections based
@@ -423,8 +427,9 @@ class ArangoGraph(GraphStore):
             if not self.db.has_graph(graph_name):
                 self.db.create_graph(graph_name, edge_definitions)
 
-            else:
+            elif update_graph_definition_if_exists:
                 graph = self.db.graph(graph_name)
+
                 for e_d in edge_definitions:
                     if not graph.has_edge_definition(e_d["edge_collection"]):
                         graph.create_edge_definition(*e_d.values())
