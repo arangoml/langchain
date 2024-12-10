@@ -520,9 +520,11 @@ class ArangoGraph(GraphStore):
 
         source_key = self.__hash(source.id)
         target_key = self.__hash(target.id)
+        edge_key = self.__hash(f"{source.id}{edge.type}{target.id}")
 
         edges[entity_edge_collection_name].append(
             {
+                "_key": edge_key,
                 "_from": f"{entity_collection_name}/{source_key}",
                 "_to": f"{entity_collection_name}/{target_key}",
                 "type": edge.type,
@@ -542,18 +544,20 @@ class ArangoGraph(GraphStore):
         source: Node = edge.source
         target: Node = edge.target
 
-        source_key = self.__hash(source.id)
-        target_key = self.__hash(target.id)
-
         edge_type = self.__sanitize_collection_name(edge.type)
         source_type = self.__sanitize_collection_name(source.type)
         target_type = self.__sanitize_collection_name(target.type)
+
+        source_key = self.__hash(source.id)
+        target_key = self.__hash(target.id)
+        edge_key = self.__hash(f"{source.id}{edge.type}{target.id}")
 
         edge_definitions_dict[edge_type]["from_vertex_collections"].add(source_type)
         edge_definitions_dict[edge_type]["to_vertex_collections"].add(target_type)
 
         edges[edge_type].append(
             {
+                "_key": edge_key,
                 "_from": f"{source_type}/{source_key}",
                 "_to": f"{target_type}/{target_key}",
                 **edge.properties,
