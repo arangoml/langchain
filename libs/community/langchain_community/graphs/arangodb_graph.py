@@ -73,10 +73,6 @@ class ArangoGraph(GraphStore):
             m = "ArangoDB not installed, please install with `pip install python-arango`."
             raise ImportError(m)
 
-        if not FARMHASH_INSTALLED:
-            m = "Farmhash not installed, please install with `pip install cityhash`."
-            raise ImportError(m)
-
         self.__db = db
         self.__async_db = db.begin_async_execution()
 
@@ -299,6 +295,10 @@ class ArangoGraph(GraphStore):
         the relationships between nodes. Defaults to "LINKS_TO". Only used if
         `use_one_entity_collection` is True.
         """
+        if not FARMHASH_INSTALLED:
+            m = "Farmhash not installed, please install with `pip install cityhash`."
+            raise ImportError(m)
+
         if not graph_documents:
             return
 
