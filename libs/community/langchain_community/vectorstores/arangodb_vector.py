@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Type
-from uuid import uuid4
+from typing import Any, Iterable, List, Optional, Sequence, Tuple, Type
 
 import numpy as np
 from langchain_core.documents import Document
@@ -11,16 +10,27 @@ from langchain_core.vectorstores import VectorStore
 from packaging import version
 
 try:
-    from arango.database import Database
+    from arango.database import StandardDatabase
     from arango.exceptions import ArangoServerError
-    from arango.graph import Graph
 
     ARANGO_INSTALLED = True
 except ImportError:
     print("ArangoDB not installed, please install with `pip install python-arango`.")
     ARANGO_INSTALLED = False
 
-from langchain_community.vectorstores.utils import DistanceStrategy, maximal_marginal_relevance
+try:
+    import farmhash
+
+    FARMHASH_INSTALLED = True
+except ImportError:
+    print("Farmhash not installed, please install with `pip install cityhash`.")
+    FARMHASH_INSTALLED = False
+
+
+from langchain_community.vectorstores.utils import (
+    DistanceStrategy,
+    maximal_marginal_relevance,
+)
 
 DEFAULT_DISTANCE_STRATEGY = DistanceStrategy.COSINE
 DISTANCE_MAPPING = {
@@ -80,14 +90,13 @@ class ArangoVector(VectorStore):
     def __init__(
         self,
         embedding: Embeddings,
-        *,
-        database: "Database",
         embedding_dimension: int,
+        database: "StandardDatabase",
         search_type: SearchType = DEFAULT_SEARCH_TYPE,
         collection_name: str = "documents",
-        index_name: str = "vector_index",
-        text_field: str = "text",
         embedding_field: str = "embedding",
+        text_field: str = "text",
+        index_name: str = "vector_index",
         distance_strategy: DistanceStrategy = DEFAULT_DISTANCE_STRATEGY,
         num_centroids: int = 1,
     ):
@@ -96,8 +105,8 @@ class ArangoVector(VectorStore):
             raise ImportError(m)
 
         # TODO: Enable when ready
-        # if version.parse(database.version()) < version.parse("3.12.0"):
-        # raise ValueError("ArangoDB version must be 3.12.0 or greater")
+        # if version.parse(database.version()) < version.parse("3.12.3"):
+        # raise ValueError("ArangoDB version must be 3.12.3 or greater")
 
         if search_type not in [SearchType.VECTOR]:
             raise ValueError("search_type must be 'vector'")
@@ -106,27 +115,72 @@ class ArangoVector(VectorStore):
             DistanceStrategy.COSINE,
             DistanceStrategy.EUCLIDEAN_DISTANCE,
         ]:
-            raise ValueError("distance_strategy must be 'COSINE' or 'EUCLIDEAN_DISTANCE'")
+            m = "distance_strategy must be 'COSINE' or 'EUCLIDEAN_DISTANCE'"
+            raise ValueError(m)
 
-        self.db = database
         self.embedding = embedding
+        self.embedding_dimension = embedding_dimension
+        self.db = database
+        self.async_db = self.db.begin_async_execution(return_result=False)
+        self.search_type = search_type
         self.collection_name = collection_name
-        self.index_name = index_name
+        self.collection = self.db.collection(self.collection_name)
         self.embedding_field = embedding_field
         self.text_field = text_field
-        self.distance_strategy = DISTANCE_MAPPING[distance_strategy]
-        self.embedding_dimension = embedding_dimension
-        self.num_centroids = num_centroids
         self.index_name = index_name
+        self.distance_strategy = DISTANCE_MAPPING[distance_strategy]
+        self.num_centroids = num_centroids
 
-        if not database.has_collection(collection_name):
-            database.create_collection(collection_name)
-
-        self.collection = database.collection(self.collection_name)
+        if not self.db.has_collection(collection_name):
+            self.db.create_collection(collection_name)
 
     @property
     def embeddings(self) -> Embeddings:
         return self.embedding
+
+    def retrieve_vector_index(self) -> dict[str, Any] | None:
+        """Retrieve the vector index from the collection."""
+        indexes = self.collection.indexes()
+        for index in indexes:
+            if index["name"] == self.index_name:
+                return index
+
+        return None
+
+    def create_vector_index(self) -> None:
+        """Create the vector index on the collection."""
+        self.collection.add_index(
+            {
+                "name": self.index_name,
+                "type": "vector",
+                "fields": [self.embedding_field],
+                "params": {
+                    "metric": self.distance_strategy,
+                    "dimensions": self.embedding_dimension,
+                    "nLists": self.num_centroids,
+                },
+            }
+        )
+
+    def delete_vector_index(self) -> None:
+        """Delete the vector index from the collection."""
+        index = self.retrieve_vector_index()
+
+        if index is not None:
+            self.collection.delete_index(index["id"])
+
+    # @classmethod
+    # def __from(
+    #     cls,
+    #     texts: List[str],
+    #     embeddings: List[List[float]],
+    #     embedding: Embeddings,
+    #     metadatas: Optional[List[dict]] = None,
+    #     ids: Optional[List[str]] = None,
+    #     create_id_index: bool = True,
+    #     search_type: SearchType = DEFAULT_SEARCH_TYPE,
+    #     **kwargs: Any,
+    # ) -> ArangoVector:
 
     def add_embeddings(
         self,
@@ -134,39 +188,44 @@ class ArangoVector(VectorStore):
         embeddings: List[List[float]],
         metadatas: Optional[List[dict]] = None,
         ids: Optional[List[str]] = None,
+        batch_size: int = 500,
+        use_async_db: bool = False,
         **kwargs: Any,
     ) -> List[str]:
+        """Add embeddings to the vectorstore."""
+        if not FARMHASH_INSTALLED and ids is None:
+            m = "farmhash not installed, please install with `pip install cityhash`."
+            raise ImportError(m)
+
         if ids is None:
-            ids = [str(uuid4()) for _ in texts]
+            ids = [str(farmhash.Fingerprint64(text)) for text in texts]
 
         if not metadatas:
             metadatas = [{} for _ in texts]
 
-        to_insert = [
-            {
-                "_key": id_,
-                self.text_field: text,
-                self.embedding_field: embedding,
-                "metadata": metadata,
-            }
-            for id_, text, embedding, metadata in zip(ids, texts, embeddings, metadatas)
-        ]
+        if len(ids) != len(texts) != len(embeddings) != len(metadatas):
+            m = "Length of ids, texts, embeddings and metadatas must be the same."
+            raise ValueError(m)
 
-        self.collection.import_bulk(to_insert, on_duplicate="update", **kwargs)
+        db = self.async_db if use_async_db else self.db
+        collection = db.collection(self.collection_name)
 
-        if self.index_name not in [index["name"] for index in self.collection.indexes()]:
-            self.collection.add_index(
+        data = []
+        for _key, text, embedding, metadata in zip(ids, texts, embeddings, metadatas):
+            data.append(
                 {
-                    "name": self.index_name,
-                    "type": "vector",
-                    "fields": [self.embedding_field],
-                    "params": {
-                        "metric": self.distance_strategy,
-                        "dimensions": self.embedding_dimension,
-                        "nLists": self.num_centroids,
-                    },
+                    "_key": _key,
+                    self.text_field: text,
+                    self.embedding_field: embedding,
+                    "metadata": metadata,
                 }
             )
+
+            if len(data) == batch_size:
+                collection.import_bulk(data, on_duplicate="update", **kwargs)
+                data = []
+
+        collection.import_bulk(data, on_duplicate="update", **kwargs)
 
         return ids
 
@@ -188,13 +247,16 @@ class ArangoVector(VectorStore):
             List of ids from adding the texts into the vectorstore.
         """
         embeddings = self.embedding.embed_documents(list(texts))
-        return self.add_embeddings(texts=texts, embeddings=embeddings, metadatas=metadatas, ids=ids, **kwargs)
+
+        return self.add_embeddings(
+            texts=texts, embeddings=embeddings, metadatas=metadatas, ids=ids, **kwargs
+        )
 
     def similarity_search(
         self,
         query: str,
         k: int = 4,
-        return_full_doc: bool = True,
+        return_full_doc: bool = False,
         **kwargs: Any,
     ) -> List[Document]:
         """Run similarity search with ArangoDB.
@@ -203,7 +265,7 @@ class ArangoVector(VectorStore):
             query (str): Query text to search for.
             k (int): Number of results to return. Defaults to 4.
             return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key. Defaults to True.
+                If false, will just return the _key & text. Defaults to False.
 
         Returns:
             List of Documents most similar to the query.
@@ -215,7 +277,7 @@ class ArangoVector(VectorStore):
         self,
         embedding: List[float],
         k: int = 4,
-        return_full_doc: bool = True,
+        return_full_doc: bool = False,
         **kwargs: Any,
     ) -> List[Document]:
         """Return docs most similar to embedding vector.
@@ -224,13 +286,17 @@ class ArangoVector(VectorStore):
             embedding: Embedding to look up documents similar to.
             k: Number of Documents to return. Defaults to 4.
             return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key. Defaults to True.
+                If false, will just return the _key & text. Defaults to False.
 
         Returns:
             List of Documents most similar to the query vector.
         """
         docs_and_scores = self.similarity_search_by_vector_with_score(
-            embedding=embedding, k=k, return_full_doc=return_full_doc, **kwargs
+            embedding=embedding,
+            k=k,
+            return_full_doc=return_full_doc,
+            return_embedding=False,
+            **kwargs,
         )
 
         return [doc for doc, _ in docs_and_scores]
@@ -239,7 +305,7 @@ class ArangoVector(VectorStore):
         self,
         query: str,
         k: int = 4,
-        return_full_doc: bool = True,
+        return_full_doc: bool = False,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         """Return docs most similar to query.
@@ -248,7 +314,7 @@ class ArangoVector(VectorStore):
             query: Text to look up documents similar to.
             k: Number of Documents to return. Defaults to 4.
             return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key. Defaults to True.
+                If false, will just return the _key & text. Defaults to False.
 
         Returns:
             List of Documents most similar to the query and score for each
@@ -259,6 +325,7 @@ class ArangoVector(VectorStore):
             k=k,
             query=query,
             return_full_doc=return_full_doc,
+            return_embedding=False,
             **kwargs,
         )
         return result
@@ -268,6 +335,7 @@ class ArangoVector(VectorStore):
         embedding: List[float],
         k: int = 4,
         return_full_doc: bool = False,
+        return_embedding: bool = False,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         """Return docs most similar to embedding vector.
@@ -276,40 +344,61 @@ class ArangoVector(VectorStore):
             embedding: Embedding to look up documents similar to.
             k: Number of Documents to return. Defaults to 4.
             return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key. Defaults to True.
+                If false, will just return the _key and text field. Defaults to False.
+            return_embedding (bool): Whether to return the embedding in the result.
+                If false, will not return the embedding. Defaults to False.
+                If return_full_doc is True and return_embedding is False,
+                the embedding will be removed from the document.
 
         Returns:
             List of Documents most similar to the query vector.
         """
         if self.distance_strategy == "cosine":
-            sort_func = "APPROX_NEAR_COSINE"
+            score_func = "APPROX_NEAR_COSINE"
+            sort_order = "DESC"
         elif self.distance_strategy == "l2":
-            sort_func = "APPROX_NEAR_L2"
+            score_func = "APPROX_NEAR_L2"
+            sort_order = "ASC"
         else:
             raise ValueError(f"Unsupported metric: {self.distance_strategy}")
 
+        if return_full_doc and return_embedding:
+            data_subquery = "doc"
+        elif return_full_doc:
+            data_subquery = f"UNSET(doc, '{self.embedding_field}')"
+        elif return_embedding:
+            data_subquery = f"{{'_key': doc._key, '{self.embedding_field}': doc.{self.embedding_field}, '{self.text_field}': doc.{self.text_field}}}"
+        else:
+            data_subquery = (
+                f"{{'_key': doc._key, '{self.text_field}': doc.{self.text_field}}}"
+            )
+
         aql = f"""
             FOR doc IN @@collection
-                LET score = {sort_func}(doc.{self.embedding_field}, @embedding)
-                SORT score DESC
-                LIMIT @k
-                LET data = @return_full_doc ? doc : {{'_key': doc._key, {self.text_field}: doc.{self.text_field}}}
+                LET score = {score_func}(doc.{self.embedding_field}, @query_embedding)
+                SORT score {sort_order}
+                LIMIT {k}
+                LET data = {data_subquery}
                 RETURN {{data, score}}
         """
 
         bind_vars = {
             "@collection": self.collection_name,
-            "embedding": embedding,
-            "k": k,
-            "return_full_doc": return_full_doc,
+            "query_embedding": embedding,
         }
 
         cursor = self.db.aql.execute(aql, bind_vars=bind_vars)
 
         results = []
+        data: dict[str, Any]
         for result in cursor:
-            page_content = result["data"].pop(self.text_field)
-            results.append((Document(page_content=page_content, **result["data"]), result["score"]))
+            data = result["data"]
+
+            page_content = data.pop(self.text_field)
+
+            results.append(
+                (Document(page_content=page_content, **result["data"]), result["score"])
+            )
 
         return results
 
@@ -348,6 +437,7 @@ class ArangoVector(VectorStore):
         k: int = 4,
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
+        return_full_doc: bool = False,
         **kwargs: Any,
     ) -> List[Document]:
         """Return docs selected using the maximal marginal relevance.
@@ -374,7 +464,8 @@ class ArangoVector(VectorStore):
         docs_with_scores = self.similarity_search_by_vector_with_score(
             embedding=query_embedding,
             k=fetch_k,
-            return_full_doc=True,
+            return_full_doc=return_full_doc,
+            return_embedding=True,
             **kwargs,
         )
 
@@ -388,52 +479,24 @@ class ArangoVector(VectorStore):
 
         selected_docs = [docs_with_scores[i][0] for i in selected_indices]
 
-        # Remove embedding values from metadata
-        for doc in selected_docs:
-            del doc[self.embedding_field]
-
         return selected_docs
-
-    def _select_relevance_score_fn(self) -> Callable[[float], float]:
-        """
-        The 'correct' relevance function
-        may differ depending on a few things, including:
-        - the distance / similarity metric used by the VectorStore
-        - the scale of your embeddings (OpenAI's are unit normed. Many others are not!)
-        - embedding dimensionality
-        - etc.
-        """
-        if self.override_relevance_score_fn is not None:
-            return self.override_relevance_score_fn
-
-        # Default strategy is to rely on distance strategy provided
-        # in vectorstore constructor
-        if self._distance_strategy == DistanceStrategy.COSINE:
-            return lambda x: x
-        elif self._distance_strategy == DistanceStrategy.L2:
-            return lambda x: x
-        else:
-            raise ValueError(
-                "No supported normalization function"
-                f" for distance_strategy of {self._distance_strategy}."
-                "Consider providing relevance_score_fn to PGVector constructor."
-            )
 
     @classmethod
     def from_texts(
         cls: Type[ArangoVector],
         texts: List[str],
         embedding: Embeddings,
-        database: "Database",
+        database: "StandardDatabase",
         search_type: SearchType = DEFAULT_SEARCH_TYPE,
         collection_name: str = "documents",
-        index_name: str = "vector_index",
-        text_field: str = "text",
         embedding_field: str = "embedding",
+        text_field: str = "text",
+        index_name: str = "vector_index",
         distance_strategy: DistanceStrategy = DEFAULT_DISTANCE_STRATEGY,
         num_centroids: int = 1,
         metadatas: Optional[List[dict]] = None,
         ids: Optional[List[str]] = None,
+        overwrite_index: bool = False,
         **kwargs: Any,
     ) -> ArangoVector:
         """
@@ -445,18 +508,25 @@ class ArangoVector(VectorStore):
 
         store = cls(
             embedding,
-            database=database,
-            collection_name=collection_name,
             embedding_dimension=embedding_dimension,
+            database=database,
             search_type=search_type,
-            index_name=index_name,
-            text_field=text_field,
+            collection_name=collection_name,
             embedding_field=embedding_field,
+            text_field=text_field,
+            index_name=index_name,
             distance_strategy=distance_strategy,
             num_centroids=num_centroids,
             **kwargs,
         )
 
+        if overwrite_index:
+            store.delete_vector_index()
+
         store.add_embeddings(texts, embeddings, metadatas=metadatas, ids=ids, **kwargs)
+
+        index = store.retrieve_vector_index()
+        if index is None:
+            store.create_vector_index()
 
         return store
