@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Iterable, List, Optional, Sequence, Tuple, Type
+from typing import Any, Iterable, List, Optional, Sequence, Tuple, Type, Callable
 
 import numpy as np
 from langchain_core.documents import Document
@@ -99,6 +99,7 @@ class ArangoVector(VectorStore):
         index_name: str = "vector_index",
         distance_strategy: DistanceStrategy = DEFAULT_DISTANCE_STRATEGY,
         num_centroids: int = 1,
+        relevance_score_fn: Optional[Callable[[float], float]] = None,
     ):
         if not ARANGO_INSTALLED:
             m = "ArangoDB not installed, please install with `pip install python-arango`."
@@ -128,8 +129,9 @@ class ArangoVector(VectorStore):
         self.embedding_field = embedding_field
         self.text_field = text_field
         self.index_name = index_name
-        self.distance_strategy = DISTANCE_MAPPING[distance_strategy]
+        self._distance_strategy = DISTANCE_MAPPING[distance_strategy]
         self.num_centroids = num_centroids
+        self.override_relevance_score_fn = relevance_score_fn
 
         if not self.db.has_collection(collection_name):
             self.db.create_collection(collection_name)
@@ -155,8 +157,8 @@ class ArangoVector(VectorStore):
                 "type": "vector",
                 "fields": [self.embedding_field],
                 "params": {
-                    "metric": self.distance_strategy,
-                    "dimensions": self.embedding_dimension,
+                    "metric": self._distance_strategy,
+                    "dimension": self.embedding_dimension,
                     "nLists": self.num_centroids,
                 },
             }
@@ -353,14 +355,14 @@ class ArangoVector(VectorStore):
         Returns:
             List of Documents most similar to the query vector.
         """
-        if self.distance_strategy == "cosine":
+        if self._distance_strategy == "cosine":
             score_func = "APPROX_NEAR_COSINE"
             sort_order = "DESC"
-        elif self.distance_strategy == "l2":
+        elif self._distance_strategy == "l2":
             score_func = "APPROX_NEAR_L2"
             sort_order = "ASC"
         else:
-            raise ValueError(f"Unsupported metric: {self.distance_strategy}")
+            raise ValueError(f"Unsupported metric: {self._distance_strategy}")
 
         if return_full_doc and return_embedding:
             data_subquery = "doc"
@@ -530,3 +532,20 @@ class ArangoVector(VectorStore):
             store.create_vector_index()
 
         return store
+
+    def _select_relevance_score_fn(self) -> Callable[[float], float]:
+        if self.override_relevance_score_fn is not None:
+            return self.override_relevance_score_fn
+
+        # Default strategy is to rely on distance strategy provided
+        # in vectorstore constructor
+        if self._distance_strategy == DistanceStrategy.COSINE:
+            return lambda x: x
+        elif self._distance_strategy == DistanceStrategy.EUCLIDEAN_DISTANCE:
+            return lambda x: x
+        else:
+            raise ValueError(
+                "No supported normalization function"
+                f" for distance_strategy of {self._distance_strategy}."
+                "Consider providing relevance_score_fn to ArangoVector constructor."
+            )
