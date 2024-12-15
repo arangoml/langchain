@@ -539,9 +539,7 @@ class ArangoVector(VectorStore):
 
         # Default strategy is to rely on distance strategy provided
         # in vectorstore constructor
-        if self._distance_strategy == DistanceStrategy.COSINE:
-            return lambda x: x
-        elif self._distance_strategy == DistanceStrategy.EUCLIDEAN_DISTANCE:
+        if self._distance_strategy in ["cosine", "l2"]:
             return lambda x: x
         else:
             raise ValueError(
