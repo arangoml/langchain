@@ -246,6 +246,7 @@ class ArangoVector(VectorStore):
         query: str,
         k: int = 4,
         return_fields: set[str] = set(),
+        embedding: Optional[List[float]] = None,
         **kwargs: Any,
     ) -> List[Document]:
         """Run similarity search with ArangoDB.
@@ -260,7 +261,7 @@ class ArangoVector(VectorStore):
         Returns:
             List of Documents most similar to the query.
         """
-        embedding = self.embedding.embed_query(query)
+        embedding = embedding or self.embedding.embed_query(query)
         return self.similarity_search_by_vector(embedding, k, return_fields)
 
     def similarity_search_by_vector(
@@ -296,6 +297,7 @@ class ArangoVector(VectorStore):
         query: str,
         k: int = 4,
         return_fields: set[str] = set(),
+        embedding: Optional[List[float]] = None,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         """Return docs most similar to query.
@@ -310,7 +312,7 @@ class ArangoVector(VectorStore):
         Returns:
             List of Documents most similar to the query and score for each
         """
-        embedding = self.embedding.embed_query(query)
+        embedding = embedding or self.embedding.embed_query(query)
         result = self.similarity_search_by_vector_with_score(
             embedding=embedding,
             k=k,
@@ -428,6 +430,7 @@ class ArangoVector(VectorStore):
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
         return_fields: set[str] = set(),
+        embedding: Optional[List[float]] = None,
         **kwargs: Any,
     ) -> List[Document]:
         """Return docs selected using the maximal marginal relevance.
@@ -450,7 +453,7 @@ class ArangoVector(VectorStore):
         return_fields.add(self.embedding_field)
 
         # Embed the query
-        query_embedding = self.embedding.embed_query(query)
+        query_embedding = embedding or self.embedding.embed_query(query)
 
         # Fetch the initial documents
         docs_with_scores = self.similarity_search_by_vector_with_score(
