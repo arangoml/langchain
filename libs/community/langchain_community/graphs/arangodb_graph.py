@@ -255,10 +255,10 @@ class ArangoGraph(GraphStore):
         batch_size: int = 1000,
         use_one_entity_collection: bool = True,
         insert_async: bool = False,
-        source_collection_name: str = SOURCE_VERTEX_COLLECTION,
-        source_edge_collection_name: str = SOURCE_EDGE_COLLECTION,
-        entity_collection_name: str = ENTITY_VERTEX_COLLECTION,
-        entity_edge_collection_name: str = ENTITY_EDGE_COLLECTION,
+        source_collection_name: str | None = None,
+        source_edge_collection_name: str | None = None,
+        entity_collection_name: str | None = None,
+        entity_edge_collection_name: str | None = None,
     ) -> None:
         """
         Constructs nodes & relationships in the graph based on the
@@ -305,6 +305,16 @@ class ArangoGraph(GraphStore):
         #########
         # Setup #
         #########
+
+        suffix = f"{graph_name}_" if graph_name else ""
+        if not source_collection_name:
+            source_collection_name = f"{suffix}{SOURCE_VERTEX_COLLECTION}"
+        if not source_edge_collection_name:
+            source_edge_collection_name = f"{suffix}{SOURCE_EDGE_COLLECTION}"
+        if not entity_collection_name:
+            entity_collection_name = f"{suffix}{ENTITY_VERTEX_COLLECTION}"
+        if not entity_edge_collection_name:
+            entity_edge_collection_name = f"{suffix}{ENTITY_EDGE_COLLECTION}"
 
         insertion_db = self.__async_db if insert_async else self.__db
         nodes: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
