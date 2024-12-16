@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Iterable, List, Optional, Sequence, Tuple, Type, Callable
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, Type
 
 import numpy as np
 from langchain_core.documents import Document
@@ -125,7 +125,6 @@ class ArangoVector(VectorStore):
         self.async_db = self.db.begin_async_execution(return_result=False)
         self.search_type = search_type
         self.collection_name = collection_name
-        self.collection = self.db.collection(self.collection_name)
         self.embedding_field = embedding_field
         self.text_field = text_field
         self.index_name = index_name
@@ -135,6 +134,8 @@ class ArangoVector(VectorStore):
 
         if not self.db.has_collection(collection_name):
             self.db.create_collection(collection_name)
+
+        self.collection = self.db.collection(self.collection_name)
 
     @property
     def embeddings(self) -> Embeddings:
@@ -171,19 +172,6 @@ class ArangoVector(VectorStore):
         if index is not None:
             self.collection.delete_index(index["id"])
 
-    # @classmethod
-    # def __from(
-    #     cls,
-    #     texts: List[str],
-    #     embeddings: List[List[float]],
-    #     embedding: Embeddings,
-    #     metadatas: Optional[List[dict]] = None,
-    #     ids: Optional[List[str]] = None,
-    #     create_id_index: bool = True,
-    #     search_type: SearchType = DEFAULT_SEARCH_TYPE,
-    #     **kwargs: Any,
-    # ) -> ArangoVector:
-
     def add_embeddings(
         self,
         texts: Iterable[str],
@@ -200,7 +188,7 @@ class ArangoVector(VectorStore):
             raise ImportError(m)
 
         if ids is None:
-            ids = [str(farmhash.Fingerprint64(text)) for text in texts]
+            ids = [str(farmhash.Fingerprint64(text.encode("utf-8"))) for text in texts]
 
         if not metadatas:
             metadatas = [{} for _ in texts]
@@ -258,7 +246,7 @@ class ArangoVector(VectorStore):
         self,
         query: str,
         k: int = 4,
-        return_full_doc: bool = False,
+        return_fields: set[str] = set(),
         **kwargs: Any,
     ) -> List[Document]:
         """Run similarity search with ArangoDB.
@@ -266,20 +254,21 @@ class ArangoVector(VectorStore):
         Args:
             query (str): Query text to search for.
             k (int): Number of results to return. Defaults to 4.
-            return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key & text. Defaults to False.
+            return_fields: Fields to return in the result. For example,
+                {"foo", "bar"} will return the "foo" and "bar" fields of the document,
+                in addition to the _key & text field. Defaults to an empty set.
 
         Returns:
             List of Documents most similar to the query.
         """
         embedding = self.embedding.embed_query(query)
-        return self.similarity_search_by_vector(embedding, k, return_full_doc)
+        return self.similarity_search_by_vector(embedding, k, return_fields)
 
     def similarity_search_by_vector(
         self,
         embedding: List[float],
         k: int = 4,
-        return_full_doc: bool = False,
+        return_fields: set[str] = set(),
         **kwargs: Any,
     ) -> List[Document]:
         """Return docs most similar to embedding vector.
@@ -287,8 +276,9 @@ class ArangoVector(VectorStore):
         Args:
             embedding: Embedding to look up documents similar to.
             k: Number of Documents to return. Defaults to 4.
-            return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key & text. Defaults to False.
+            return_fields: Fields to return in the result. For example,
+                {"foo", "bar"} will return the "foo" and "bar" fields of the document,
+                in addition to the _key & text field. Defaults to an empty set.
 
         Returns:
             List of Documents most similar to the query vector.
@@ -296,8 +286,7 @@ class ArangoVector(VectorStore):
         docs_and_scores = self.similarity_search_by_vector_with_score(
             embedding=embedding,
             k=k,
-            return_full_doc=return_full_doc,
-            return_embedding=False,
+            return_fields=return_fields,
             **kwargs,
         )
 
@@ -307,7 +296,7 @@ class ArangoVector(VectorStore):
         self,
         query: str,
         k: int = 4,
-        return_full_doc: bool = False,
+        return_fields: set[str] = set(),
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         """Return docs most similar to query.
@@ -315,8 +304,9 @@ class ArangoVector(VectorStore):
         Args:
             query: Text to look up documents similar to.
             k: Number of Documents to return. Defaults to 4.
-            return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key & text. Defaults to False.
+            return_fields: Fields to return in the result. For example,
+                {"foo", "bar"} will return the "foo" and "bar" fields of the document,
+                in addition to the _key & text field. Defaults to an empty set.
 
         Returns:
             List of Documents most similar to the query and score for each
@@ -326,8 +316,7 @@ class ArangoVector(VectorStore):
             embedding=embedding,
             k=k,
             query=query,
-            return_full_doc=return_full_doc,
-            return_embedding=False,
+            return_fields=return_fields,
             **kwargs,
         )
         return result
@@ -336,8 +325,7 @@ class ArangoVector(VectorStore):
         self,
         embedding: List[float],
         k: int = 4,
-        return_full_doc: bool = False,
-        return_embedding: bool = False,
+        return_fields: set[str] = set(),
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         """Return docs most similar to embedding vector.
@@ -345,13 +333,10 @@ class ArangoVector(VectorStore):
         Args:
             embedding: Embedding to look up documents similar to.
             k: Number of Documents to return. Defaults to 4.
-            return_full_doc (bool): Whether to return the full document.
-                If false, will just return the _key and text field. Defaults to False.
-            return_embedding (bool): Whether to return the embedding in the result.
-                If false, will not return the embedding. Defaults to False.
-                If return_full_doc is True and return_embedding is False,
-                the embedding will be removed from the document.
-
+            return_fields: Fields to return in the result. For example,
+                {"foo", "bar"} will return the "foo" and "bar" fields of the document,
+                in addition to the _key & text field. Defaults to an empty set. To
+                return all fields, use return_all_fields=True.
         Returns:
             List of Documents most similar to the query vector.
         """
@@ -364,23 +349,15 @@ class ArangoVector(VectorStore):
         else:
             raise ValueError(f"Unsupported metric: {self._distance_strategy}")
 
-        if return_full_doc and return_embedding:
-            data_subquery = "doc"
-        elif return_full_doc:
-            data_subquery = f"UNSET(doc, '{self.embedding_field}')"
-        elif return_embedding:
-            data_subquery = f"{{'_key': doc._key, '{self.embedding_field}': doc.{self.embedding_field}, '{self.text_field}': doc.{self.text_field}}}"
-        else:
-            data_subquery = (
-                f"{{'_key': doc._key, '{self.text_field}': doc.{self.text_field}}}"
-            )
+        return_fields.update({"_key", self.text_field})
+        return_fields_list = list(return_fields)
 
         aql = f"""
             FOR doc IN @@collection
                 LET score = {score_func}(doc.{self.embedding_field}, @query_embedding)
                 SORT score {sort_order}
                 LIMIT {k}
-                LET data = {data_subquery}
+                LET data = f"KEEP(doc, {return_fields_list})"
                 RETURN {{data, score}}
         """
 
@@ -415,6 +392,9 @@ class ArangoVector(VectorStore):
             Optional[bool]: True if deletion is successful,
             False otherwise, None if not implemented.
         """
+        if not ids:
+            return False
+
         for result in self.collection.delete_many(ids, **kwargs):
             if isinstance(result, ArangoServerError):
                 print(result)
@@ -431,7 +411,16 @@ class ArangoVector(VectorStore):
         Returns:
             List of Documents with the given ids.
         """
-        return self.collection.get_many(ids)
+        docs = []
+        doc: dict[str, Any]
+
+        for doc in self.collection.get_many(ids):
+            _key = doc.pop("_key")
+            page_content = doc.pop(self.text_field)
+
+            docs.append(Document(page_content=page_content, id=_key, metadata=doc))
+
+        return docs
 
     def max_marginal_relevance_search(
         self,
@@ -439,7 +428,7 @@ class ArangoVector(VectorStore):
         k: int = 4,
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
-        return_full_doc: bool = False,
+        return_fields: set[str] = set(),
         **kwargs: Any,
     ) -> List[Document]:
         """Return docs selected using the maximal marginal relevance.
@@ -459,6 +448,8 @@ class ArangoVector(VectorStore):
         Returns:
             List of Documents selected by maximal marginal relevance.
         """
+        return_fields.add(self.embedding_field)
+
         # Embed the query
         query_embedding = self.embedding.embed_query(query)
 
@@ -466,8 +457,7 @@ class ArangoVector(VectorStore):
         docs_with_scores = self.similarity_search_by_vector_with_score(
             embedding=query_embedding,
             k=fetch_k,
-            return_full_doc=return_full_doc,
-            return_embedding=True,
+            return_fields=return_fields,
             **kwargs,
         )
 
