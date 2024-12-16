@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import (Any, Callable, Iterable, List, Optional, Sequence, Tuple,
-                    Type)
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, Type
 
 import numpy as np
 from langchain_core.documents import Document
@@ -28,8 +27,10 @@ except ImportError:
     FARMHASH_INSTALLED = False
 
 
-from langchain_community.vectorstores.utils import (DistanceStrategy,
-                                                    maximal_marginal_relevance)
+from langchain_community.vectorstores.utils import (
+    DistanceStrategy,
+    maximal_marginal_relevance,
+)
 
 DEFAULT_DISTANCE_STRATEGY = DistanceStrategy.COSINE
 DISTANCE_MAPPING = {
@@ -65,23 +66,26 @@ class ArangoVector(VectorStore):
         embedding_field: The field name storing the embedding vector. (default: "embedding")
         distance_strategy: The distance strategy to use. (default: "COSINE")
         num_centroids: The number of centroids for the vector index. (default: 1)
+        relevance_score_fn: A function to normalize the relevance score. If not provided,
+            the default normalization function for the distance strategy will be used.
 
     Example:
         .. code-block:: python
 
             from arango import ArangoClient
             from langchain_community.embeddings.openai import OpenAIEmbeddings
-            from langchain_community.vectorstores.arangodb_vector import ArangoDBVector
+            from langchain_community.vectorstores.arangodb_vector import ArangoVector
 
             db = ArangoClient("http://localhost:8529").db("test", username="root", password="openSesame")
 
-            vector_store = ArangoDBVector(
-                embedding=OpenAIEmbeddings(), database=db
+            embedding = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=dimension)
+
+            vector_store = ArangoVector.from_texts(
+                texts=["hello world", "hello langchain", "hello arangodb"],
+                embedding=embedding,
+                database=db,
+                collection_name="Documents"
             )
-
-            texts = ["hello world", "hello langchain", "hello arangodb"]
-
-            vector_store.add_texts(texts)
 
             print(vector_store.similarity_search("arangodb", k=1))
     """
@@ -91,8 +95,8 @@ class ArangoVector(VectorStore):
         embedding: Embeddings,
         embedding_dimension: int,
         database: "StandardDatabase",
+        collection_name: str,
         search_type: SearchType = DEFAULT_SEARCH_TYPE,
-        collection_name: str = "documents",
         embedding_field: str = "embedding",
         text_field: str = "text",
         index_name: str = "vector_index",
@@ -358,7 +362,7 @@ class ArangoVector(VectorStore):
                 LET score = {score_func}(doc.{self.embedding_field}, @query_embedding)
                 SORT score {sort_order}
                 LIMIT {k}
-                LET data = f"KEEP(doc, {return_fields_list})"
+                LET data = KEEP(doc, {return_fields_list})
                 RETURN {{data, score}}
         """
 
@@ -372,13 +376,13 @@ class ArangoVector(VectorStore):
         results = []
         data: dict[str, Any]
         for result in cursor:
+            _key = data.pop("_key")
+            page_content = data.pop(self.text_field)
             data = result["data"]
 
-            page_content = data.pop(self.text_field)
+            doc = Document(page_content=page_content, id=_key, metadata=data)
 
-            results.append(
-                (Document(page_content=page_content, **result["data"]), result["score"])
-            )
+            results.append((doc, result["score"]))
 
         return results
 
