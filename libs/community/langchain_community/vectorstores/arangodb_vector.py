@@ -469,7 +469,7 @@ class ArangoVector(VectorStore):
         )
 
         # Get the embeddings for the fetched documents
-        embeddings = [doc[self.embedding_field] for doc, _ in docs_with_scores]
+        embeddings = [doc.metadata[self.embedding_field] for doc, _ in docs_with_scores]
 
         # Select documents using maximal marginal relevance
         selected_indices = maximal_marginal_relevance(
