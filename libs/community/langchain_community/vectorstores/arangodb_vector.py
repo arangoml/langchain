@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, Type
+from typing import (Any, Callable, Iterable, List, Optional, Sequence, Tuple,
+                    Type)
 
 import numpy as np
 from langchain_core.documents import Document
@@ -27,10 +28,8 @@ except ImportError:
     FARMHASH_INSTALLED = False
 
 
-from langchain_community.vectorstores.utils import (
-    DistanceStrategy,
-    maximal_marginal_relevance,
-)
+from langchain_community.vectorstores.utils import (DistanceStrategy,
+                                                    maximal_marginal_relevance)
 
 DEFAULT_DISTANCE_STRATEGY = DistanceStrategy.COSINE
 DISTANCE_MAPPING = {
@@ -128,7 +127,7 @@ class ArangoVector(VectorStore):
         self.embedding_field = embedding_field
         self.text_field = text_field
         self.index_name = index_name
-        self._distance_strategy = DISTANCE_MAPPING[distance_strategy]
+        self._distance_strategy = distance_strategy
         self.num_centroids = num_centroids
         self.override_relevance_score_fn = relevance_score_fn
 
@@ -158,7 +157,7 @@ class ArangoVector(VectorStore):
                 "type": "vector",
                 "fields": [self.embedding_field],
                 "params": {
-                    "metric": self._distance_strategy,
+                    "metric": DISTANCE_MAPPING[self._distance_strategy],
                     "dimension": self.embedding_dimension,
                     "nLists": self.num_centroids,
                 },
@@ -340,10 +339,10 @@ class ArangoVector(VectorStore):
         Returns:
             List of Documents most similar to the query vector.
         """
-        if self._distance_strategy == "cosine":
+        if self._distance_strategy == DistanceStrategy.COSINE:
             score_func = "APPROX_NEAR_COSINE"
             sort_order = "DESC"
-        elif self._distance_strategy == "l2":
+        elif self._distance_strategy == DistanceStrategy.EUCLIDEAN_DISTANCE:
             score_func = "APPROX_NEAR_L2"
             sort_order = "ASC"
         else:
@@ -529,7 +528,10 @@ class ArangoVector(VectorStore):
 
         # Default strategy is to rely on distance strategy provided
         # in vectorstore constructor
-        if self._distance_strategy in ["cosine", "l2"]:
+        if self._distance_strategy in [
+            DistanceStrategy.COSINE,
+            DistanceStrategy.EUCLIDEAN_DISTANCE,
+        ]:
             return lambda x: x
         else:
             raise ValueError(
