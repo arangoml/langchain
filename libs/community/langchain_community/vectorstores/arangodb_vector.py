@@ -376,9 +376,10 @@ class ArangoVector(VectorStore):
         results = []
         data: dict[str, Any]
         for result in cursor:
+            data = result["data"]
+
             _key = data.pop("_key")
             page_content = data.pop(self.text_field)
-            data = result["data"]
 
             doc = Document(page_content=page_content, id=_key, metadata=data)
 
