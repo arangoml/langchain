@@ -18,14 +18,6 @@ except ImportError:
     print("ArangoDB not installed, please install with `pip install python-arango`.")
     ARANGO_INSTALLED = False
 
-try:
-    import farmhash
-
-    FARMHASH_INSTALLED = True
-except ImportError:
-    print("Farmhash not installed, please install with `pip install cityhash`.")
-    FARMHASH_INSTALLED = False
-
 
 from langchain_community.vectorstores.utils import (
     DistanceStrategy,
@@ -191,11 +183,13 @@ class ArangoVector(VectorStore):
         **kwargs: Any,
     ) -> List[str]:
         """Add embeddings to the vectorstore."""
-        if not FARMHASH_INSTALLED and ids is None:
-            m = "farmhash not installed, please install with `pip install cityhash`."
-            raise ImportError(m)
-
         if ids is None:
+            try:
+                import farmhash
+            except ImportError:
+                m = "Farmhash not installed, please install with `pip install cityhash`.  Alternatively, provide ids."
+                raise ImportError(m)
+
             ids = [str(farmhash.Fingerprint64(text.encode("utf-8"))) for text in texts]
 
         if not metadatas:
