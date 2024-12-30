@@ -24,14 +24,6 @@ except ImportError:
     print("ArangoDB not installed, please install with `pip install python-arango`.")
     ARANGO_INSTALLED = False
 
-try:
-    import farmhash
-
-    FARMHASH_INSTALLED = True
-except ImportError:
-    print("Farmhash not installed, please install with `pip install cityhash`.")
-    FARMHASH_INSTALLED = False
-
 SOURCE_VERTEX_COLLECTION = "SOURCE"
 SOURCE_EDGE_COLLECTION = "HAS_SOURCE"
 ENTITY_VERTEX_COLLECTION = "ENTITY"
@@ -259,6 +251,7 @@ class ArangoGraph(GraphStore):
         source_edge_collection_name: str | None = None,
         entity_collection_name: str | None = None,
         entity_edge_collection_name: str | None = None,
+        source_metadata_fields_to_extract_to_top_level: set[str] = {},
     ) -> None:
         """
         Constructs nodes & relationships in the graph based on the
@@ -294,13 +287,20 @@ class ArangoGraph(GraphStore):
         - entity_edge_collection_name (str): The name of the edge collection to store
         the relationships between nodes. Defaults to "LINKS_TO". Only used if
         `use_one_entity_collection` is True.
+        - source_metadata_fields_to_extract_to_top_level (set[str]): A set of field names
+        to extract from the source document metadata and add to the top level of the source
+        document. This is useful for making metadata fields more accessible for querying.
+        Defaults to an empty set. Only used if `include_source` is True.
         """
-        if not FARMHASH_INSTALLED:
+        if not graph_documents:
+            print("No Graph Documents to insert.")
+            return
+
+        try:
+            import farmhash
+        except ImportError:
             m = "Farmhash not installed, please install with `pip install cityhash`."
             raise ImportError(m)
-
-        if not graph_documents:
-            return
 
         #########
         # Setup #
@@ -319,18 +319,17 @@ class ArangoGraph(GraphStore):
         insertion_db = self.__async_db if insert_async else self.__db
         nodes: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
         edges: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
-        edge_definitions_dict: DefaultDict[
-            str, DefaultDict[str, set[str]]
-        ] = defaultdict(lambda: defaultdict(set))
+        edge_definitions_dict: DefaultDict[str, DefaultDict[str, set[str]]] = (
+            defaultdict(lambda: defaultdict(set))
+        )
 
         if include_source:
             self.__create_collection(source_collection_name)
             self.__create_collection(source_edge_collection_name, is_edge=True)
 
+            from_cols = {entity_collection_name} if use_one_entity_collection else set()
             edge_definitions_dict[source_edge_collection_name] = {
-                "from_vertex_collections": {entity_collection_name}
-                if use_one_entity_collection
-                else set(),
+                "from_vertex_collections": from_cols,
                 "to_vertex_collections": {source_collection_name},
             }
 
@@ -365,7 +364,9 @@ class ArangoGraph(GraphStore):
             # 1. Process Source Document
             if include_source:
                 source_id_hash = self.__process_source(
-                    document.source, source_collection_name
+                    document.source,
+                    source_collection_name,
+                    source_metadata_fields_to_extract_to_top_level,
                 )
 
             # 2. Process Nodes
@@ -574,17 +575,29 @@ class ArangoGraph(GraphStore):
             }
         )
 
-    def __process_source(self, source: Document, source_collection_name: str) -> str:
+    def __process_source(
+        self,
+        source: Document,
+        source_collection_name: str,
+        source_metadata_fields_to_extract_to_top_level: set[str],
+    ) -> str:
         """Processes a Graph Document Source into ArangoDB."""
         source_id = self.__hash(
             source.id if source.id else source.page_content.encode("utf-8")
         )
 
+        top_level_fields = {}
+        metadata = source.metadata
+        for field in source_metadata_fields_to_extract_to_top_level:
+            if field in metadata:
+                top_level_fields[field] = metadata.pop(field)
+
         doc = {
             "_key": source_id,
             "text": source.page_content,
             "type": source.type,
-            "metadata": source.metadata,
+            "metadata": metadata,
+            **top_level_fields,
         }
 
         self.db.collection(source_collection_name).insert(doc, overwrite=True)
@@ -593,6 +606,8 @@ class ArangoGraph(GraphStore):
 
     def __hash(self, value: Any) -> str:
         """Applies the Farmhash hash function to a value."""
+        import farmhash
+
         try:
             value_str = str(value)
         except Exception:
