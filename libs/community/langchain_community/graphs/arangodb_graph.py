@@ -580,17 +580,12 @@ class ArangoGraph(GraphStore):
             source.id if source.id else source.page_content.encode("utf-8")
         )
 
-        embeddings = source.metadata.pop("embeddings")
-
         doc = {
             "_key": source_id,
             "text": source.page_content,
             "type": source.type,
             "metadata": source.metadata,
         }
-
-        if embeddings:
-            doc["embeddings"] = embeddings
 
         self.db.collection(source_collection_name).insert(doc, overwrite=True)
 
