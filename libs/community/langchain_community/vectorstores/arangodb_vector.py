@@ -57,13 +57,13 @@ class ArangoVector(VectorStore):
     Args:
         embedding: Any embedding function implementing
             `langchain.embeddings.base.Embeddings` interface.
-        database: The python-arango database instance.
         embedding_dimension: The dimension of the to-be-inserted embedding vectors.
-        search_type: The type of search to be performed, currently only 'vector' is supported.
+        database: The python-arango database instance.
         collection_name: The name of the collection to use. (default: "documents")
-        index_name: The name of the vector index to use. (default: "vector_index")
-        text_field: The field name storing the text. (default: "text")
+        search_type: The type of search to be performed, currently only 'vector' is supported.
         embedding_field: The field name storing the embedding vector. (default: "embedding")
+        text_field: The field name storing the text. (default: "text")
+        index_name: The name of the vector index to use. (default: "vector_index")
         distance_strategy: The distance strategy to use. (default: "COSINE")
         num_centroids: The number of centroids for the vector index. (default: 1)
         relevance_score_fn: A function to normalize the relevance score. If not provided,
@@ -95,7 +95,7 @@ class ArangoVector(VectorStore):
         embedding: Embeddings,
         embedding_dimension: int,
         database: "StandardDatabase",
-        collection_name: str,
+        collection_name: str = "documents",
         search_type: SearchType = DEFAULT_SEARCH_TYPE,
         embedding_field: str = "embedding",
         text_field: str = "text",
@@ -139,6 +139,11 @@ class ArangoVector(VectorStore):
             self.db.create_collection(collection_name)
 
         self.collection = self.db.collection(self.collection_name)
+
+        index = self.retrieve_vector_index()
+        if index is not None:
+            m = "Index found. Using existing index. If you want to recreate the index, use `delete_vector_index`."
+            print(m)
 
     @property
     def embeddings(self) -> Embeddings:
@@ -250,6 +255,7 @@ class ArangoVector(VectorStore):
         query: str,
         k: int = 4,
         return_fields: set[str] = set(),
+        use_approx: bool = True,
         embedding: Optional[List[float]] = None,
         **kwargs: Any,
     ) -> List[Document]:
@@ -261,18 +267,29 @@ class ArangoVector(VectorStore):
             return_fields: Fields to return in the result. For example,
                 {"foo", "bar"} will return the "foo" and "bar" fields of the document,
                 in addition to the _key & text field. Defaults to an empty set.
+            use_approx: Whether to use approximate search. Defaults to True. If False,
+                exact search will be used.
+            embedding: Optional embedding to use for the query. If not provided,
+                the query will be embedded using the embedding function provided
+                in the constructor.
 
         Returns:
             List of Documents most similar to the query.
         """
         embedding = embedding or self.embedding.embed_query(query)
-        return self.similarity_search_by_vector(embedding, k, return_fields)
+        return self.similarity_search_by_vector(
+            embedding=embedding,
+            k=k,
+            return_fields=return_fields,
+            use_approx=use_approx,
+        )
 
     def similarity_search_by_vector(
         self,
         embedding: List[float],
         k: int = 4,
         return_fields: set[str] = set(),
+        use_approx: bool = True,
         **kwargs: Any,
     ) -> List[Document]:
         """Return docs most similar to embedding vector.
@@ -283,6 +300,8 @@ class ArangoVector(VectorStore):
             return_fields: Fields to return in the result. For example,
                 {"foo", "bar"} will return the "foo" and "bar" fields of the document,
                 in addition to the _key & text field. Defaults to an empty set.
+            use_approx: Whether to use approximate search. Defaults to True. If False,
+                exact search will be used.
 
         Returns:
             List of Documents most similar to the query vector.
@@ -291,6 +310,7 @@ class ArangoVector(VectorStore):
             embedding=embedding,
             k=k,
             return_fields=return_fields,
+            use_approx=use_approx,
             **kwargs,
         )
 
@@ -301,6 +321,7 @@ class ArangoVector(VectorStore):
         query: str,
         k: int = 4,
         return_fields: set[str] = set(),
+        use_approx: bool = True,
         embedding: Optional[List[float]] = None,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
@@ -312,6 +333,11 @@ class ArangoVector(VectorStore):
             return_fields: Fields to return in the result. For example,
                 {"foo", "bar"} will return the "foo" and "bar" fields of the document,
                 in addition to the _key & text field. Defaults to an empty set.
+            use_approx: Whether to use approximate search. Defaults to True. If False,
+                exact search will be used.
+            embedding: Optional embedding to use for the query. If not provided,
+                the query will be embedded using the embedding function provided
+                in the constructor.
 
         Returns:
             List of Documents most similar to the query and score for each
@@ -322,6 +348,7 @@ class ArangoVector(VectorStore):
             k=k,
             query=query,
             return_fields=return_fields,
+            use_approx=use_approx,
             **kwargs,
         )
         return result
@@ -331,6 +358,7 @@ class ArangoVector(VectorStore):
         embedding: List[float],
         k: int = 4,
         return_fields: set[str] = set(),
+        use_approx: bool = True,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         """Return docs most similar to embedding vector.
@@ -342,17 +370,23 @@ class ArangoVector(VectorStore):
                 {"foo", "bar"} will return the "foo" and "bar" fields of the document,
                 in addition to the _key & text field. Defaults to an empty set. To
                 return all fields, use return_all_fields=True.
+            use_approx: Whether to use approximate search. Defaults to True. If False,
+                exact search will be used.
         Returns:
             List of Documents most similar to the query vector.
         """
         if self._distance_strategy == DistanceStrategy.COSINE:
-            score_func = "APPROX_NEAR_COSINE"
+            score_func = "APPROX_NEAR_COSINE" if use_approx else "COSINE_SIMILARITY"
             sort_order = "DESC"
         elif self._distance_strategy == DistanceStrategy.EUCLIDEAN_DISTANCE:
-            score_func = "APPROX_NEAR_L2"
+            score_func = "APPROX_NEAR_L2" if use_approx else "L2_DISTANCE"
             sort_order = "ASC"
         else:
             raise ValueError(f"Unsupported metric: {self._distance_strategy}")
+
+        if use_approx and not self.retrieve_vector_index():
+            print("Index not found, creating index...")
+            self.create_vector_index()
 
         return_fields.update({"_key", self.text_field})
         return_fields_list = list(return_fields)
@@ -373,17 +407,19 @@ class ArangoVector(VectorStore):
 
         cursor = self.db.aql.execute(aql, bind_vars=bind_vars)
 
-        results = []
+        score: float
         data: dict[str, Any]
+        result: dict[str, Any]
+        results = []
+
         for result in cursor:
-            data = result["data"]
+            data, score = result["data"], result["score"]
 
             _key = data.pop("_key")
             page_content = data.pop(self.text_field)
 
             doc = Document(page_content=page_content, id=_key, metadata=data)
-
-            results.append((doc, result["score"]))
+            results.append((doc, score))
 
         return results
 
@@ -435,6 +471,7 @@ class ArangoVector(VectorStore):
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
         return_fields: set[str] = set(),
+        use_approx: bool = True,
         embedding: Optional[List[float]] = None,
         **kwargs: Any,
     ) -> List[Document]:
@@ -451,6 +488,14 @@ class ArangoVector(VectorStore):
                         of diversity among the results with 0 corresponding
                         to maximum diversity and 1 to minimum diversity.
                         Defaults to 0.5.
+            return_fields: Fields to return in the result. For example,
+                {"foo", "bar"} will return the "foo" and "bar" fields of the document,
+                in addition to the _key & text field. Defaults to an empty set.
+            use_approx: Whether to use approximate search. Defaults to True. If False,
+                exact search will be used.
+            embedding: Optional embedding to use for the query. If not provided,
+                the query will be embedded using the embedding function provided
+                in the constructor.
 
         Returns:
             List of Documents selected by maximal marginal relevance.
@@ -465,6 +510,7 @@ class ArangoVector(VectorStore):
             embedding=query_embedding,
             k=fetch_k,
             return_fields=return_fields,
+            use_approx=use_approx,
             **kwargs,
         )
 
@@ -486,8 +532,8 @@ class ArangoVector(VectorStore):
         texts: List[str],
         embedding: Embeddings,
         database: "StandardDatabase",
-        search_type: SearchType = DEFAULT_SEARCH_TYPE,
         collection_name: str = "documents",
+        search_type: SearchType = DEFAULT_SEARCH_TYPE,
         embedding_field: str = "embedding",
         text_field: str = "text",
         index_name: str = "vector_index",
@@ -509,8 +555,8 @@ class ArangoVector(VectorStore):
             embedding,
             embedding_dimension=embedding_dimension,
             database=database,
-            search_type=search_type,
             collection_name=collection_name,
+            search_type=search_type,
             embedding_field=embedding_field,
             text_field=text_field,
             index_name=index_name,
@@ -523,10 +569,6 @@ class ArangoVector(VectorStore):
             store.delete_vector_index()
 
         store.add_embeddings(texts, embeddings, metadatas=metadatas, ids=ids, **kwargs)
-
-        index = store.retrieve_vector_index()
-        if index is None:
-            store.create_vector_index()
 
         return store
 
