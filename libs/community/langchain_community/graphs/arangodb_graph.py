@@ -13,7 +13,6 @@ from langchain_community.graphs.graph_document import (
     Relationship,
 )
 from langchain_community.graphs.graph_store import GraphStore
-from langchain_community.graphs.neo4j_graph import value_sanitize
 
 try:
     from arango.database import StandardDatabase
@@ -28,6 +27,55 @@ SOURCE_VERTEX_COLLECTION = "SOURCE"
 SOURCE_EDGE_COLLECTION = "HAS_SOURCE"
 ENTITY_VERTEX_COLLECTION = "ENTITY"
 ENTITY_EDGE_COLLECTION = "LINKS_TO"
+
+
+# Taken from langchain_community/graphs/neo4j_graph.py
+def value_sanitize(d: Any) -> Any:
+    """Sanitize the input dictionary or list.
+
+    Sanitizes the input by removing embedding-like values,
+    lists with more than 128 elements, that are mostly irrelevant for
+    generating answers in a LLM context. These properties, if left in
+    results, can occupy significant context space and detract from
+    the LLM's performance by introducing unnecessary noise and cost.
+
+    Args:
+        d (Any): The input dictionary or list to sanitize.
+
+    Returns:
+        Any: The sanitized dictionary or list.
+    """
+    LIST_LIMIT = 128
+
+    if isinstance(d, dict):
+        new_dict = {}
+        for key, value in d.items():
+            if isinstance(value, dict):
+                sanitized_value = value_sanitize(value)
+                if (
+                    sanitized_value is not None
+                ):  # Check if the sanitized value is not None
+                    new_dict[key] = sanitized_value
+            elif isinstance(value, list):
+                if len(value) < LIST_LIMIT:
+                    sanitized_value = value_sanitize(value)
+                    if (
+                        sanitized_value is not None
+                    ):  # Check if the sanitized value is not None
+                        new_dict[key] = sanitized_value
+                # Do not include the key if the list is oversized
+            else:
+                new_dict[key] = value
+        return new_dict
+    elif isinstance(d, list):
+        if len(d) < LIST_LIMIT:
+            return [
+                value_sanitize(item) for item in d if value_sanitize(item) is not None
+            ]
+        else:
+            return None
+    else:
+        return d
 
 
 class ArangoGraph(GraphStore):
@@ -370,8 +418,10 @@ class ArangoGraph(GraphStore):
                 )
 
             # 2. Process Nodes
+            node_key_map = {}
             for i, node in enumerate(document.nodes, 1):
                 node_key = self.__hash(node.id)
+                node_key_map[node.id] = node_key
                 node_type = process_node_fn(
                     node_key, node, nodes, entity_collection_name
                 )
@@ -400,8 +450,30 @@ class ArangoGraph(GraphStore):
 
             # 3. Process Edges
             for i, edge in enumerate(document.relationships, 1):
+                source, target = edge.source, edge.target
+
+                source_key = self.__get_node_key(
+                    source,
+                    nodes,
+                    node_key_map,
+                    entity_collection_name,
+                    process_node_fn,
+                )
+
+                target_key = self.__get_node_key(
+                    target,
+                    nodes,
+                    node_key_map,
+                    entity_collection_name,
+                    process_node_fn,
+                )
+
+                edge_key = self.__hash(f"{source.id}{edge.type}{target.id}")
                 process_edge_fn(
                     edge,
+                    edge_key,
+                    source_key,
+                    target_key,
                     edges,
                     entity_collection_name,
                     entity_edge_collection_name,
@@ -411,8 +483,10 @@ class ArangoGraph(GraphStore):
                 # 3.1 Batch Insert
                 if i % batch_size == 0:
                     self.__import_data(insertion_db, edges, is_edge=True)
+                    self.__import_data(insertion_db, nodes, is_edge=False)
 
             self.__import_data(insertion_db, edges, is_edge=True)
+            self.__import_data(insertion_db, nodes, is_edge=False)
 
         ##################
         # Graph Creation #
@@ -520,19 +594,15 @@ class ArangoGraph(GraphStore):
     def __process_edge_as_entity(
         self,
         edge: Relationship,
+        edge_key: str,
+        source_key: str,
+        target_key: str,
         edges: DefaultDict[str, list],
         entity_collection_name: str,
         entity_edge_collection_name: str,
         _: DefaultDict[str, DefaultDict[str, set[str]]],
     ) -> None:
         """Processes a Graph Document Edge into ArangoDB as a unanimous Entity."""
-        source: Node = edge.source
-        target: Node = edge.target
-
-        source_key = self.__hash(source.id)
-        target_key = self.__hash(target.id)
-        edge_key = self.__hash(f"{source.id}{edge.type}{target.id}")
-
         edges[entity_edge_collection_name].append(
             {
                 "_key": edge_key,
@@ -546,6 +616,9 @@ class ArangoGraph(GraphStore):
     def __process_edge_as_type(
         self,
         edge: Relationship,
+        edge_key: str,
+        source_key: str,
+        target_key: str,
         edges: DefaultDict[str, list],
         _1: str,
         _2: str,
@@ -559,10 +632,6 @@ class ArangoGraph(GraphStore):
         source_type = self.__sanitize_collection_name(source.type)
         target_type = self.__sanitize_collection_name(target.type)
 
-        source_key = self.__hash(source.id)
-        target_key = self.__hash(target.id)
-        edge_key = self.__hash(f"{source.id}{edge.type}{target.id}")
-
         edge_definitions_dict[edge_type]["from_vertex_collections"].add(source_type)
         edge_definitions_dict[edge_type]["to_vertex_collections"].add(target_type)
 
@@ -574,6 +643,24 @@ class ArangoGraph(GraphStore):
                 **edge.properties,
             }
         )
+
+    def __get_node_key(
+        self,
+        node: Node,
+        nodes: DefaultDict[str, list],
+        node_key_map: Dict[str, str],
+        entity_collection_name: str,
+        process_node_fn: Any,
+    ) -> str:
+        """Gets the key of a node and processes it if it doesn't exist."""
+        if node.id in node_key_map:
+            return node_key_map[node.id]
+
+        node_key = self.__hash(node.id)
+        node_key_map[node.id] = node_key
+        process_node_fn(node_key, node, nodes, entity_collection_name)
+
+        return node_key
 
     def __process_source(
         self,
