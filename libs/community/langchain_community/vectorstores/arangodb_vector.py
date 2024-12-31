@@ -132,11 +132,6 @@ class ArangoVector(VectorStore):
 
         self.collection = self.db.collection(self.collection_name)
 
-        index = self.retrieve_vector_index()
-        if index is not None:
-            m = "Index found. Using existing index. If you want to recreate the index, use `delete_vector_index`."
-            print(m)
-
     @property
     def embeddings(self) -> Embeddings:
         return self.embedding
