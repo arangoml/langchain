@@ -147,6 +147,17 @@ class ArangoVector(VectorStore):
 
     def create_vector_index(self) -> None:
         """Create the vector index on the collection."""
+        print({
+            "name": self.index_name,
+            "type": "vector",
+            "fields": [self.embedding_field],
+            "params": {
+                "metric": DISTANCE_MAPPING[self._distance_strategy],
+                "dimension": self.embedding_dimension,
+                "nLists": self.num_centroids,
+            },
+        })
+
         self.collection.add_index(
             {
                 "name": self.index_name,
