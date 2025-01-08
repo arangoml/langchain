@@ -147,7 +147,7 @@ class ArangoVector(VectorStore):
 
     def create_vector_index(self) -> None:
         """Create the vector index on the collection."""
-        self.collection.add_index(
+        result = self.collection.add_index(
             {
                 "name": self.index_name,
                 "type": "vector",
@@ -159,6 +159,8 @@ class ArangoVector(VectorStore):
                 },
             }
         )
+
+        print("Index created: ", result)
 
     def delete_vector_index(self) -> None:
         """Delete the vector index from the collection."""
