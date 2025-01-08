@@ -115,7 +115,7 @@ class ArangoVector(VectorStore):
             raise ValueError(m)
 
         self.embedding = embedding
-        self.embedding_dimension = embedding_dimension
+        self.embedding_dimension = int(embedding_dimension)
         self.db = database
         self.async_db = self.db.begin_async_execution(return_result=False)
         self.search_type = search_type
@@ -147,7 +147,7 @@ class ArangoVector(VectorStore):
 
     def create_vector_index(self) -> None:
         """Create the vector index on the collection."""
-        result = self.collection.add_index(
+        self.collection.add_index(
             {
                 "name": self.index_name,
                 "type": "vector",
@@ -159,8 +159,6 @@ class ArangoVector(VectorStore):
                 },
             }
         )
-
-        print("Index created: ", result)
 
     def delete_vector_index(self) -> None:
         """Delete the vector index from the collection."""
