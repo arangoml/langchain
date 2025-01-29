@@ -13,6 +13,7 @@ from langchain_community.graphs.graph_document import (
     Relationship,
 )
 from langchain_community.graphs.graph_store import GraphStore
+from langchain_core.embeddings import Embeddings
 
 try:
     from arango.database import StandardDatabase
@@ -29,7 +30,6 @@ ENTITY_VERTEX_COLLECTION = "ENTITY"
 ENTITY_EDGE_COLLECTION = "LINKS_TO"
 
 
-# Taken from langchain_community/graphs/neo4j_graph.py
 def value_sanitize(d: Any) -> Any:
     """Sanitize the input dictionary or list.
 
@@ -52,18 +52,13 @@ def value_sanitize(d: Any) -> Any:
         for key, value in d.items():
             if isinstance(value, dict):
                 sanitized_value = value_sanitize(value)
-                if (
-                    sanitized_value is not None
-                ):  # Check if the sanitized value is not None
+                if sanitized_value is not None:
                     new_dict[key] = sanitized_value
             elif isinstance(value, list):
                 if len(value) < LIST_LIMIT:
                     sanitized_value = value_sanitize(value)
-                    if (
-                        sanitized_value is not None
-                    ):  # Check if the sanitized value is not None
+                    if sanitized_value is not None:
                         new_dict[key] = sanitized_value
-                # Do not include the key if the list is oversized
             else:
                 new_dict[key] = value
         return new_dict
@@ -299,7 +294,11 @@ class ArangoGraph(GraphStore):
         source_edge_collection_name: str | None = None,
         entity_collection_name: str | None = None,
         entity_edge_collection_name: str | None = None,
-        source_metadata_fields_to_extract_to_top_level: set[str] = {},
+        embeddings: Embeddings | None = None,
+        embedding_field: str = "embedding",
+        embed_source: bool = False,
+        embed_nodes: bool = False,
+        embed_relationships: bool = False,
     ) -> None:
         """
         Constructs nodes & relationships in the graph based on the
@@ -335,10 +334,14 @@ class ArangoGraph(GraphStore):
         - entity_edge_collection_name (str): The name of the edge collection to store
         the relationships between nodes. Defaults to "LINKS_TO". Only used if
         `use_one_entity_collection` is True.
-        - source_metadata_fields_to_extract_to_top_level (set[str]): A set of field names
-        to extract from the source document metadata and add to the top level of the source
-        document. This is useful for making metadata fields more accessible for querying.
-        Defaults to an empty set. Only used if `include_source` is True.
+        - embeddings (Embeddings): An Embeddings object to use for embedding the source,
+        nodes and relationships. Defaults to None.
+        - embedding_field (set[str]): The field name to store the embedding. Defaults to "embedding".
+            Only used if `embedding` is not None, and `embed_source`, `embed_nodes`, or
+            `embed_relationships` is True.
+        - embed_source (bool): If True, embeds the source document. Defaults to False.
+        - embed_nodes (bool): If True, embeds the nodes. Defaults to False.
+        - embed_relationships (bool): If True, embeds the relationships. Defaults to False.
         """
         if not graph_documents:
             print("No Graph Documents to insert.")
@@ -349,6 +352,13 @@ class ArangoGraph(GraphStore):
         except ImportError:
             m = "Farmhash not installed, please install with `pip install cityhash`."
             raise ImportError(m)
+
+        if not embeddings and (embed_source or embed_nodes or embed_relationships):
+            m = "**embedding** is required to embed source, nodes, or relationships."
+            raise ValueError(m)
+
+        def embed_text(text: str) -> list[float]:
+            return embeddings.embed_documents([text])[0]
 
         #########
         # Setup #
@@ -402,19 +412,24 @@ class ArangoGraph(GraphStore):
             else self.__process_edge_as_type
         )
 
-        source_id_hash = None
-
         #######################
         # Document Processing #
         #######################
 
         for document in graph_documents:
+            source_id_hash = None
+
             # 1. Process Source Document
             if include_source:
+                source_embedding = (
+                    embed_text(document.source.page_content) if embed_source else None
+                )
+
                 source_id_hash = self.__process_source(
                     document.source,
                     source_collection_name,
-                    source_metadata_fields_to_extract_to_top_level,
+                    source_embedding,
+                    embedding_field,
                 )
 
             # 2. Process Nodes
@@ -422,6 +437,10 @@ class ArangoGraph(GraphStore):
             for i, node in enumerate(document.nodes, 1):
                 node_key = self.__hash(node.id)
                 node_key_map[node.id] = node_key
+
+                if embed_nodes:
+                    node.properties[embedding_field] = embed_text(str(node.id))
+
                 node_type = process_node_fn(
                     node_key, node, nodes, entity_collection_name
                 )
@@ -452,6 +471,12 @@ class ArangoGraph(GraphStore):
             for i, edge in enumerate(document.relationships, 1):
                 source, target = edge.source, edge.target
 
+                # TODO: Parameterize edge string as a UDF?
+                edge_str = f"{source.id}{edge.type}{target.id}"
+
+                if embed_relationships:
+                    edge.properties[embedding_field] = embed_text(edge_str)
+
                 source_key = self.__get_node_key(
                     source,
                     nodes,
@@ -468,7 +493,7 @@ class ArangoGraph(GraphStore):
                     process_node_fn,
                 )
 
-                edge_key = self.__hash(f"{source.id}{edge.type}{target.id}")
+                edge_key = self.__hash(edge_str)
                 process_edge_fn(
                     edge,
                     edge_key,
@@ -666,26 +691,23 @@ class ArangoGraph(GraphStore):
         self,
         source: Document,
         source_collection_name: str,
-        source_metadata_fields_to_extract_to_top_level: set[str],
+        source_embedding: list[float] | None,
+        embedding_field: str,
     ) -> str:
         """Processes a Graph Document Source into ArangoDB."""
         source_id = self.__hash(
             source.id if source.id else source.page_content.encode("utf-8")
         )
 
-        top_level_fields = {}
-        metadata = source.metadata
-        for field in source_metadata_fields_to_extract_to_top_level:
-            if field in metadata:
-                top_level_fields[field] = metadata.pop(field)
-
         doc = {
             "_key": source_id,
             "text": source.page_content,
             "type": source.type,
-            "metadata": metadata,
-            **top_level_fields,
+            "metadata": source.metadata,
         }
+
+        if source_embedding:
+            doc[embedding_field] = source_embedding
 
         self.db.collection(source_collection_name).insert(doc, overwrite=True)
 
