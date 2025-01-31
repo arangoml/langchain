@@ -358,7 +358,15 @@ class ArangoGraph(GraphStore):
             raise ValueError(m)
 
         def embed_text(text: str) -> list[float]:
-            return embeddings.embed_documents([text])[0]
+            res = embeddings.embed_documents([text])[0]
+
+            while type(res) is list:
+                if type(res[0]) is float:
+                    break
+
+                res = res[0]
+
+            return res
 
         #########
         # Setup #
