@@ -201,10 +201,10 @@ class ArangoVector(VectorStore):
         for _key, text, embedding, metadata in zip(ids, texts, embeddings, metadatas):
             data.append(
                 {
+                    **metadata,
                     "_key": _key,
                     self.text_field: text,
                     self.embedding_field: embedding,
-                    "metadata": metadata,
                 }
             )
 

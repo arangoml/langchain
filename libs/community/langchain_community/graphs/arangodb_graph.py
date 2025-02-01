@@ -608,10 +608,10 @@ class ArangoGraph(GraphStore):
         """Processes a Graph Document Node into ArangoDB as a unanimous Entity."""
         nodes[entity_collection_name].append(
             {
+                **node.properties,
                 "_key": node_key,
                 "name": node.id,
                 "type": node.type,
-                **node.properties,
             }
         )
         return entity_collection_name
@@ -638,11 +638,11 @@ class ArangoGraph(GraphStore):
         """Processes a Graph Document Edge into ArangoDB as a unanimous Entity."""
         edges[entity_edge_collection_name].append(
             {
+                **edge.properties,
                 "_key": edge_key,
                 "_from": f"{entity_collection_name}/{source_key}",
                 "_to": f"{entity_collection_name}/{target_key}",
                 "type": edge.type,
-                **edge.properties,
             }
         )
 
@@ -670,10 +670,10 @@ class ArangoGraph(GraphStore):
 
         edges[edge_type].append(
             {
+                **edge.properties,
                 "_key": edge_key,
                 "_from": f"{source_type}/{source_key}",
                 "_to": f"{target_type}/{target_key}",
-                **edge.properties,
             }
         )
 
@@ -708,10 +708,10 @@ class ArangoGraph(GraphStore):
         )
 
         doc = {
+            **source.metadata,
             "_key": source_id,
             "text": source.page_content,
             "type": source.type,
-            "metadata": source.metadata,
         }
 
         if source_embedding:
