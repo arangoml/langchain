@@ -480,7 +480,7 @@ class ArangoGraph(GraphStore):
                 source, target = edge.source, edge.target
 
                 # TODO: Parameterize edge string as a UDF?
-                edge_str = f"{source.id}{edge.type}{target.id}"
+                edge_str = f"{source.id} {edge.type} {target.id}"
 
                 if embed_relationships:
                     edge.properties[embedding_field] = embed_text(edge_str)
