@@ -485,6 +485,9 @@ class ArangoGraph(GraphStore):
                 if embed_relationships:
                     edge.properties[embedding_field] = embed_text(edge_str)
 
+                if include_source:
+                    edge.properties["source_id"] = source_id_hash
+
                 source_key = self.__get_node_key(
                     source,
                     nodes,
