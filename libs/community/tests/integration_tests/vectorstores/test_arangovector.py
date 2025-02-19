@@ -17,7 +17,7 @@ except ImportError:
 
 url = os.environ.get("ARANGO_URL", "http://localhost:8529")
 username = os.environ.get("ARANGO_USERNAME", "root")
-password = os.environ.get("ARANGO_PASSWORD", "test")
+password = os.environ.get("ARANGO_PASSWORD", "")
 collection_name = "documents"
 
 db = ArangoClient(hosts=url).db("_system", password=password, verify=True)
