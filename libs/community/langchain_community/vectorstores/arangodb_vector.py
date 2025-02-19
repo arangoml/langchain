@@ -100,10 +100,6 @@ class ArangoVector(VectorStore):
             m = "ArangoDB not installed, please install with `pip install python-arango`."
             raise ImportError(m)
 
-        # TODO: Enable when ready
-        # if version.parse(database.version()) < version.parse("3.12.3"):
-        # raise ValueError("ArangoDB version must be 3.12.3 or greater")
-
         if search_type not in [SearchType.VECTOR]:
             raise ValueError("search_type must be 'vector'")
 
@@ -373,9 +369,12 @@ class ArangoVector(VectorStore):
         else:
             raise ValueError(f"Unsupported metric: {self._distance_strategy}")
 
-        if use_approx and not self.retrieve_vector_index():
-            print("Index not found, creating index...")
-            self.create_vector_index()
+        if use_approx:
+            if version.parse(self.db.version()) < version.parse("3.12.4"):
+                raise ValueError("Approximate Nearest Neighbor search requires ArangoDB >= 3.12.4, consider setting use_approx=False.")
+
+            if not self.retrieve_vector_index():
+                self.create_vector_index()
 
         return_fields.update({"_key", self.text_field})
         return_fields_list = list(return_fields)
