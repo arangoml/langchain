@@ -30,7 +30,7 @@ ENTITY_VERTEX_COLLECTION = "ENTITY"
 ENTITY_EDGE_COLLECTION = "LINKS_TO"
 
 
-def value_sanitize(d: Any) -> Any:
+def value_sanitize(d: Any, list_limit: int) -> Any:
     """Sanitize the input dictionary or list.
 
     Sanitizes the input by removing embedding-like values,
@@ -45,7 +45,6 @@ def value_sanitize(d: Any) -> Any:
     Returns:
         Any: The sanitized dictionary or list.
     """
-    LIST_LIMIT = 128
 
     if isinstance(d, dict):
         new_dict = {}
@@ -55,7 +54,7 @@ def value_sanitize(d: Any) -> Any:
                 if sanitized_value is not None:
                     new_dict[key] = sanitized_value
             elif isinstance(value, list):
-                if len(value) < LIST_LIMIT:
+                if len(value) < list_limit:
                     sanitized_value = value_sanitize(value)
                     if sanitized_value is not None:
                         new_dict[key] = sanitized_value
@@ -63,12 +62,12 @@ def value_sanitize(d: Any) -> Any:
                 new_dict[key] = value
         return new_dict
     elif isinstance(d, list):
-        if len(d) < LIST_LIMIT:
+        if len(d) < list_limit:
             return [
                 value_sanitize(item) for item in d if value_sanitize(item) is not None
             ]
         else:
-            return None
+            return f"List of {len(d)} elements of type {type(d[0])}"
     else:
         return d
 
@@ -78,12 +77,19 @@ class ArangoGraph(GraphStore):
 
     Parameters:
     - db (arango.database.StandardDatabase): ArangoDB database instance.
-    - include_examples (bool): A flag whether to scan the database for
-        example values and use them in the graph schema. Default is True.
-    - graph_name (str): The name of the graph to use to generate the schema. If
-        None, the entire database will be used.
     - generate_schema_on_init (bool): A flag whether to generate the schema
         on initialization. Default is True.
+    - schema_sample_ratio (float): A ratio (0 to 1) to determine the
+        ratio of documents/edges used (in relation to the Collection size)
+        to render each Collection Schema. If 0, one document/edge
+        is used per Collection. Default is 0.
+    - schema_graph_name (str): The name of the graph to use to generate the schema. If
+        None, the entire database will be used. Default is None.
+    - schema_include_examples (bool): A flag whether to scan the database for
+        example values and use them in the graph schema. Default is True.
+    - schema_list_limit (int): The maximum number of elements to include in a list.
+        If the list is longer than this limit, a string describing the list
+        will be used in the schema instead. Default is 32.
 
     *Security note*: Make sure that the database connection uses credentials
         that are narrowly-scoped to only include necessary permissions.
@@ -100,9 +106,11 @@ class ArangoGraph(GraphStore):
     def __init__(
         self,
         db: StandardDatabase,
-        include_examples: bool = True,
-        graph_name: Optional[str] = None,
         generate_schema_on_init: bool = True,
+        schema_sample_ratio: float = 0,
+        schema_graph_name: Optional[str] = None,
+        schema_include_examples: bool = True,
+        schema_list_limit: int = 32,
     ) -> None:
         if not ARANGO_INSTALLED:
             m = "ArangoDB not installed, please install with `pip install python-arango`."
@@ -114,7 +122,10 @@ class ArangoGraph(GraphStore):
         self.__schema = {}
         if generate_schema_on_init:
             self.__schema = self.generate_schema(
-                include_examples=include_examples, graph_name=graph_name
+                schema_sample_ratio,
+                schema_graph_name,
+                schema_include_examples,
+                schema_list_limit
             )
 
     @property
@@ -145,26 +156,32 @@ class ArangoGraph(GraphStore):
         sample_ratio: float = 0,
         graph_name: Optional[str] = None,
         include_examples: bool = True,
+        list_limit: int = 32,
     ) -> None:
         """
         Refresh the graph schema information.
 
         Parameters:
         - sample_ratio (float): A ratio (0 to 1) to determine the
-        ratio of documents/edges used (in relation to the Collection size) to render
-        each Collection Schema.
+        ratio of documents/edges used (in relation to the Collection size)
+        to render each Collection Schema. If 0, one document/edge
+        is used per Collection.
         - graph_name (str): The name of the graph to use to generate the schema. If
             None, the entire database will be used.
         - include_examples (bool): A flag whether to scan the database for
             example values and use them in the graph schema. Default is True.
+        - list_limit (int): The maximum number of elements to include in a list.
+            If the list is longer than this limit, a string describing the list
+            will be used in the schema instead. Default is 32.
         """
-        self.__schema = self.generate_schema(sample_ratio, graph_name, include_examples)
+        self.__schema = self.generate_schema(sample_ratio, graph_name, include_examples, list_limit)
 
     def generate_schema(
         self,
         sample_ratio: float = 0,
         graph_name: Optional[str] = None,
         include_examples: bool = True,
+        list_limit: int = 32,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Generates the schema of the ArangoDB Database and returns it
@@ -172,11 +189,15 @@ class ArangoGraph(GraphStore):
         Parameters:
         - sample_ratio (float): A ratio (0 to 1) to determine the
         ratio of documents/edges used (in relation to the Collection size)
-        to render each Collection Schema.
+        to render each Collection Schema. If 0, one document/edge
+        is used per Collection.
         - graph_name (str): The name of the graph to use to generate the schema. If
             None, the entire database will be used.
         - include_examples (bool): A flag whether to scan the database for
             example values and use them in the graph schema. Default is True.
+        - list_limit (int): The maximum number of elements to include in a list.
+            If the list is longer than this limit, a string describing the list
+            will be used in the schema instead. Default is 32.
         """
         if not 0 <= sample_ratio <= 1:
             raise ValueError("**sample_ratio** value must be in between 0 to 1")
@@ -218,10 +239,6 @@ class ArangoGraph(GraphStore):
             col_type: str = collection["type"]
             col_size: int = self.db.collection(col_name).count()
 
-            # Skip collection if empty
-            if col_size == 0:
-                continue
-
             # Set number of ArangoDB documents/edges to retrieve
             limit_amount = ceil(sample_ratio * col_size) or 1
 
@@ -240,11 +257,12 @@ class ArangoGraph(GraphStore):
             collection_schema_entry = {
                 "name": col_name,
                 "type": col_type,
-                f"properties": properties,
+                "size": col_size,
+                "properties": properties,
             }
 
-            if include_examples:
-                collection_schema_entry[f"example"] = value_sanitize(doc)
+            if include_examples and col_size > 0:
+                collection_schema_entry[f"example"] = value_sanitize(doc, list_limit)
 
             collection_schema.append(collection_schema_entry)
 
