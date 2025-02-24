@@ -229,7 +229,7 @@ class ArangoGraph(GraphStore):
         return {"graph_schema": graph_schema, "collection_schema": collection_schema}
 
     def query(
-        self, query: str, top_k: Optional[int] = None, **kwargs: Any
+        self, query: str, top_k: Optional[int] = None, list_limit: int = 32, **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """
         Execute an AQL query and return the results.
@@ -243,7 +243,7 @@ class ArangoGraph(GraphStore):
         - A list of dictionaries containing the query results.
         """
         cursor = self.__db.aql.execute(query, **kwargs)
-        return [self._sanitize_input(doc) for doc in itertools.islice(cursor, top_k)]
+        return [self._sanitize_input(doc, list_limit) for doc in itertools.islice(cursor, top_k)]
 
     def explain(self, query: str, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
         """
