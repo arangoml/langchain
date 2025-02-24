@@ -30,48 +30,6 @@ ENTITY_VERTEX_COLLECTION = "ENTITY"
 ENTITY_EDGE_COLLECTION = "LINKS_TO"
 
 
-def value_sanitize(d: Any, list_limit: int) -> Any:
-    """Sanitize the input dictionary or list.
-
-    Sanitizes the input by removing embedding-like values,
-    lists with more than 128 elements, that are mostly irrelevant for
-    generating answers in a LLM context. These properties, if left in
-    results, can occupy significant context space and detract from
-    the LLM's performance by introducing unnecessary noise and cost.
-
-    Args:
-        d (Any): The input dictionary or list to sanitize.
-
-    Returns:
-        Any: The sanitized dictionary or list.
-    """
-
-    if isinstance(d, dict):
-        new_dict = {}
-        for key, value in d.items():
-            if isinstance(value, dict):
-                sanitized_value = value_sanitize(value)
-                if sanitized_value is not None:
-                    new_dict[key] = sanitized_value
-            elif isinstance(value, list):
-                if len(value) < list_limit:
-                    sanitized_value = value_sanitize(value)
-                    if sanitized_value is not None:
-                        new_dict[key] = sanitized_value
-            else:
-                new_dict[key] = value
-        return new_dict
-    elif isinstance(d, list):
-        if len(d) < list_limit:
-            return [
-                value_sanitize(item) for item in d if value_sanitize(item) is not None
-            ]
-        else:
-            return f"List of {len(d)} elements of type {type(d[0])}"
-    else:
-        return d
-
-
 class ArangoGraph(GraphStore):
     """ArangoDB wrapper for graph operations.
 
@@ -125,7 +83,7 @@ class ArangoGraph(GraphStore):
                 schema_sample_ratio,
                 schema_graph_name,
                 schema_include_examples,
-                schema_list_limit
+                schema_list_limit,
             )
 
     @property
@@ -174,7 +132,9 @@ class ArangoGraph(GraphStore):
             If the list is longer than this limit, a string describing the list
             will be used in the schema instead. Default is 32.
         """
-        self.__schema = self.generate_schema(sample_ratio, graph_name, include_examples, list_limit)
+        self.__schema = self.generate_schema(
+            sample_ratio, graph_name, include_examples, list_limit
+        )
 
     def generate_schema(
         self,
@@ -368,7 +328,7 @@ class ArangoGraph(GraphStore):
         try:
             import farmhash
         except ImportError:
-            m = "Farmhash not installed, please install with `pip install cityhash`."
+            m = "Farmhash not install=, please install with `pip install cityhash`."
             raise ImportError(m)
 
         if not embeddings and (embed_source or embed_nodes or embed_relationships):
@@ -408,8 +368,8 @@ class ArangoGraph(GraphStore):
         )
 
         if include_source:
-            self.__create_collection(source_collection_name)
-            self.__create_collection(source_edge_collection_name, is_edge=True)
+            self._create_collection(source_collection_name)
+            self._create_collection(source_edge_collection_name, is_edge=True)
 
             from_cols = {entity_collection_name} if use_one_entity_collection else set()
             edge_definitions_dict[source_edge_collection_name] = {
@@ -418,8 +378,8 @@ class ArangoGraph(GraphStore):
             }
 
         if use_one_entity_collection:
-            self.__create_collection(entity_collection_name)
-            self.__create_collection(entity_edge_collection_name, is_edge=True)
+            self._create_collection(entity_collection_name)
+            self._create_collection(entity_edge_collection_name, is_edge=True)
 
             edge_definitions_dict[entity_edge_collection_name] = {
                 "from_vertex_collections": {entity_collection_name},
@@ -427,15 +387,15 @@ class ArangoGraph(GraphStore):
             }
 
         process_node_fn = (
-            self.__process_node_as_entity
+            self._process_node_as_entity
             if use_one_entity_collection
-            else self.__process_node_as_type
+            else self._process_node_as_type
         )
 
         process_edge_fn = (
-            self.__process_edge_as_entity
+            self._process_edge_as_entity
             if use_one_entity_collection
-            else self.__process_edge_as_type
+            else self._process_edge_as_type
         )
 
         #######################
@@ -451,7 +411,7 @@ class ArangoGraph(GraphStore):
                     embed_text(document.source.page_content) if embed_source else None
                 )
 
-                source_id_hash = self.__process_source(
+                source_id_hash = self._process_source(
                     document.source,
                     source_collection_name,
                     source_embedding,
@@ -461,7 +421,7 @@ class ArangoGraph(GraphStore):
             # 2. Process Nodes
             node_key_map = {}
             for i, node in enumerate(document.nodes, 1):
-                node_key = self.__hash(node.id)
+                node_key = self._hash(node.id)
                 node_key_map[node.id] = node_key
 
                 if embed_nodes:
@@ -487,17 +447,16 @@ class ArangoGraph(GraphStore):
 
                 # 2.2 Batch Insert
                 if i % batch_size == 0:
-                    self.__import_data(insertion_db, nodes, is_edge=False)
-                    self.__import_data(insertion_db, edges, is_edge=True)
+                    self._import_data(insertion_db, nodes, is_edge=False)
+                    self._import_data(insertion_db, edges, is_edge=True)
 
-            self.__import_data(insertion_db, nodes, is_edge=False)
-            self.__import_data(insertion_db, edges, is_edge=True)
+            self._import_data(insertion_db, nodes, is_edge=False)
+            self._import_data(insertion_db, edges, is_edge=True)
 
             # 3. Process Edges
             for i, edge in enumerate(document.relationships, 1):
                 source, target = edge.source, edge.target
 
-                # TODO: Parameterize edge string as a UDF?
                 edge_str = f"{source.id} {edge.type} {target.id}"
 
                 if embed_relationships:
@@ -506,7 +465,7 @@ class ArangoGraph(GraphStore):
                 if include_source:
                     edge.properties["source_id"] = source_id_hash
 
-                source_key = self.__get_node_key(
+                source_key = self._get_node_key(
                     source,
                     nodes,
                     node_key_map,
@@ -514,7 +473,7 @@ class ArangoGraph(GraphStore):
                     process_node_fn,
                 )
 
-                target_key = self.__get_node_key(
+                target_key = self._get_node_key(
                     target,
                     nodes,
                     node_key_map,
@@ -522,7 +481,7 @@ class ArangoGraph(GraphStore):
                     process_node_fn,
                 )
 
-                edge_key = self.__hash(edge_str)
+                edge_key = self._hash(edge_str)
                 process_edge_fn(
                     edge,
                     edge_key,
@@ -536,11 +495,11 @@ class ArangoGraph(GraphStore):
 
                 # 3.1 Batch Insert
                 if i % batch_size == 0:
-                    self.__import_data(insertion_db, edges, is_edge=True)
-                    self.__import_data(insertion_db, nodes, is_edge=False)
+                    self._import_data(insertion_db, edges, is_edge=True)
+                    self._import_data(insertion_db, nodes, is_edge=False)
 
-            self.__import_data(insertion_db, edges, is_edge=True)
-            self.__import_data(insertion_db, nodes, is_edge=False)
+            self._import_data(insertion_db, edges, is_edge=True)
+            self._import_data(insertion_db, nodes, is_edge=False)
 
         ##################
         # Graph Creation #
@@ -599,7 +558,7 @@ class ArangoGraph(GraphStore):
         )
         return cls(db)
 
-    def __import_data(
+    def _import_data(
         self,
         db: "StandardDatabase",
         data: Dict[str, List[Dict[str, Any]]],
@@ -607,19 +566,19 @@ class ArangoGraph(GraphStore):
     ) -> None:
         """Imports data into the ArangoDB database in bulk."""
         for collection, batch in data.items():
-            self.__create_collection(collection, is_edge)
+            self._create_collection(collection, is_edge)
             db.collection(collection).import_bulk(batch, on_duplicate="update")
 
         data.clear()
 
-    def __create_collection(
+    def _create_collection(
         self, collection_name: str, is_edge: bool = False, **kwargs
     ) -> None:
         """Creates a collection in the ArangoDB database if it does not exist."""
         if not self.db.has_collection(collection_name):
             self.db.create_collection(collection_name, edge=is_edge, **kwargs)
 
-    def __process_node_as_entity(
+    def _process_node_as_entity(
         self,
         node_key: str,
         node: Node,
@@ -637,15 +596,15 @@ class ArangoGraph(GraphStore):
         )
         return entity_collection_name
 
-    def __process_node_as_type(
+    def _process_node_as_type(
         self, node_key: str, node: Node, nodes: DefaultDict[str, list], _: str
     ) -> str:
         """Processes a Graph Document Node into ArangoDB based on its Node Type."""
-        node_type = self.__sanitize_collection_name(node.type)
+        node_type = self._sanitize_collection_name(node.type)
         nodes[node_type].append({"_key": node_key, "name": node.id, **node.properties})
         return node_type
 
-    def __process_edge_as_entity(
+    def _process_edge_as_entity(
         self,
         edge: Relationship,
         edge_key: str,
@@ -667,7 +626,7 @@ class ArangoGraph(GraphStore):
             }
         )
 
-    def __process_edge_as_type(
+    def _process_edge_as_type(
         self,
         edge: Relationship,
         edge_key: str,
@@ -682,9 +641,9 @@ class ArangoGraph(GraphStore):
         source: Node = edge.source
         target: Node = edge.target
 
-        edge_type = self.__sanitize_collection_name(edge.type)
-        source_type = self.__sanitize_collection_name(source.type)
-        target_type = self.__sanitize_collection_name(target.type)
+        edge_type = self._sanitize_collection_name(edge.type)
+        source_type = self._sanitize_collection_name(source.type)
+        target_type = self._sanitize_collection_name(target.type)
 
         edge_definitions_dict[edge_type]["from_vertex_collections"].add(source_type)
         edge_definitions_dict[edge_type]["to_vertex_collections"].add(target_type)
@@ -698,7 +657,7 @@ class ArangoGraph(GraphStore):
             }
         )
 
-    def __get_node_key(
+    def _get_node_key(
         self,
         node: Node,
         nodes: DefaultDict[str, list],
@@ -710,13 +669,13 @@ class ArangoGraph(GraphStore):
         if node.id in node_key_map:
             return node_key_map[node.id]
 
-        node_key = self.__hash(node.id)
+        node_key = self._hash(node.id)
         node_key_map[node.id] = node_key
         process_node_fn(node_key, node, nodes, entity_collection_name)
 
         return node_key
 
-    def __process_source(
+    def _process_source(
         self,
         source: Document,
         source_collection_name: str,
@@ -724,7 +683,7 @@ class ArangoGraph(GraphStore):
         embedding_field: str,
     ) -> str:
         """Processes a Graph Document Source into ArangoDB."""
-        source_id = self.__hash(
+        source_id = self._hash(
             source.id if source.id else source.page_content.encode("utf-8")
         )
 
@@ -742,7 +701,7 @@ class ArangoGraph(GraphStore):
 
         return source_id
 
-    def __hash(self, value: Any) -> str:
+    def _hash(self, value: Any) -> str:
         """Applies the Farmhash hash function to a value."""
         import farmhash
 
@@ -753,7 +712,7 @@ class ArangoGraph(GraphStore):
 
         return str(farmhash.Fingerprint64(value_str))
 
-    def __sanitize_collection_name(self, name: str) -> str:
+    def _sanitize_collection_name(self, name: str) -> str:
         """
         Modifies a string to adhere to ArangoDB collection name rules.
 
@@ -774,6 +733,52 @@ class ArangoGraph(GraphStore):
             name = f"Collection_{name}"
 
         return name
+
+    def _sanitize_input(self, d: Any, list_limit: int) -> Any:
+        """Sanitize the input dictionary or list.
+
+        Sanitizes the input by removing embedding-like values,
+        lists with more than 128 elements, that are mostly irrelevant for
+        generating answers in a LLM context. These properties, if left in
+        results, can occupy significant context space and detract from
+        the LLM's performance by introducing unnecessary noise and cost.
+
+        Args:
+            d (Any): The input dictionary or list to sanitize.
+
+        Returns:
+            Any: The sanitized dictionary or list.
+        """
+
+        if isinstance(d, dict):
+            new_dict = {}
+            for key, value in d.items():
+                if isinstance(value, dict):
+                    sanitized_value = self._sanitize_input(value, list_limit)
+                    if sanitized_value is not None:
+                        new_dict[key] = sanitized_value
+                elif isinstance(value, list):
+                    if len(value) < list_limit:
+                        sanitized_value = self._sanitize_input(value, list_limit)
+                        if sanitized_value is not None:
+                            new_dict[key] = sanitized_value
+                else:
+                    new_dict[key] = value
+            return new_dict
+        elif isinstance(d, list):
+            if len(d) == 0:
+                return d
+            elif len(d) < list_limit:
+                arr = []
+                for item in d:
+                    sanitized_item = self._sanitize_input(item, list_limit)
+                    if sanitized_item is not None:
+                        arr.append(sanitized_item)
+                return arr
+            else:
+                return f"List of {len(d)} elements of type {type(d[0])}"
+        else:
+            return d
 
 
 def get_arangodb_client(
