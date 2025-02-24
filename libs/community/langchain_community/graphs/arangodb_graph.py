@@ -222,7 +222,7 @@ class ArangoGraph(GraphStore):
             }
 
             if include_examples and col_size > 0:
-                collection_schema_entry[f"example"] = value_sanitize(doc, list_limit)
+                collection_schema_entry[f"example"] = self._sanitize_input(doc, list_limit)
 
             collection_schema.append(collection_schema_entry)
 
@@ -243,7 +243,7 @@ class ArangoGraph(GraphStore):
         - A list of dictionaries containing the query results.
         """
         cursor = self.__db.aql.execute(query, **kwargs)
-        return [value_sanitize(doc) for doc in itertools.islice(cursor, top_k)]
+        return [self._sanitize_input(doc) for doc in itertools.islice(cursor, top_k)]
 
     def explain(self, query: str, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
         """
