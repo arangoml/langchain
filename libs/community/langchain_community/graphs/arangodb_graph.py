@@ -502,6 +502,7 @@ class ArangoGraph(GraphStore):
                 edge_key = self._hash(edge_str)
                 process_edge_fn(
                     edge,
+                    edge_str,
                     edge_key,
                     source_key,
                     target_key,
@@ -625,6 +626,7 @@ class ArangoGraph(GraphStore):
     def _process_edge_as_entity(
         self,
         edge: Relationship,
+        edge_str: str,
         edge_key: str,
         source_key: str,
         target_key: str,
@@ -641,12 +643,14 @@ class ArangoGraph(GraphStore):
                 "_from": f"{entity_collection_name}/{source_key}",
                 "_to": f"{entity_collection_name}/{target_key}",
                 "type": edge.type,
+                "str": edge_str,
             }
         )
 
     def _process_edge_as_type(
         self,
         edge: Relationship,
+        edge_str: str,
         edge_key: str,
         source_key: str,
         target_key: str,
@@ -672,6 +676,7 @@ class ArangoGraph(GraphStore):
                 "_key": edge_key,
                 "_from": f"{source_type}/{source_key}",
                 "_to": f"{target_type}/{target_key}",
+                "str": edge_str,
             }
         )
 
